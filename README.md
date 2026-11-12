@@ -319,6 +319,7 @@ tsx scripts/migrate-config.ts ~/.config/promptxy/config.json
 - **[使用指南](docs/usage.md)** - CLI 配置详解、规则引擎语法和常见用例
 - **[架构设计](docs/architecture.md)** - 项目架构、技术栈和数据流设计
 - **[项目背景](docs/origin_and_requirements.md)** - 项目初衷、需求溯源和设计决策
+- **[Spec 中文分析](docs/assistant-operating-spec-analysis.md)** - 注入的《Assistant Operating Specification》结构与机制解析
 
 ## 🛠️ 开发
 
