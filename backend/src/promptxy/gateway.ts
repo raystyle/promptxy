@@ -2011,11 +2011,16 @@ export function createGateway(
         res.statusCode = upstreamResponse.status;
         res.setHeader('content-type', upstreamContentType);
         for (const [key, value] of Object.entries(responseHeaders)) {
+          // 改写后长度已变，沿用上游旧 content-length 会把响应截断
+          if (outgoingRaw !== raw && key.toLowerCase() === 'content-length') continue;
           try {
             res.setHeader(key, value);
           } catch {
             // Ignore invalid headers.
           }
+        }
+        if (outgoingRaw !== raw) {
+          res.setHeader('content-length', String(Buffer.byteLength(outgoingRaw)));
         }
         res.end(outgoingRaw);
 
