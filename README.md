@@ -203,7 +203,7 @@ export GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:7070/gemini"
 **修改注入内容时必须遵守两条硬约束**（均为上游 bigmodel `/api/anthropic` 端点的行为）：
 
 1. **内容保持纯 ASCII**：上游会对 system 首个文本块做 ascii 编码，任何非 ASCII 字符（中文、`—`、`→`、弯引号等）都会触发 500
-2. **不能并入 system 首块**：首块以 `x-anthropic-billing-header:` 开头时会被上游特殊解析，大段内容合并进去会触发裸 400——因此规则用锚定 `replace` 只写入第二块（Claude Code 提示词块）
+2. **不能并入 system 首块**：首块以 `x-anthropic-billing-header:` 开头时会被上游特殊解析，大段内容合并进去会触发裸 400，因此规则用锚定 `replace` 只写入第二块（Claude Code 提示词块）
 
 ### 规则二：思维链注入
 
@@ -213,7 +213,7 @@ export GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:7070/gemini"
 | 操作 | `prepend` 到 thinking 块头部 |
 | 语义 | 在模型思维链**开始处**注入完整《Assistant Operating Specification》，模型原生思考过程完整保留 |
 
-注入内容与规则一是同一份完整《Assistant Operating Specification》（约 26K 字符、18 节），整体 `prepend` 到 thinking 块头部——作为模型思考开始前的行为规范上下文，原生思考过程完整保留在其后（响应方向无上游编码限制）。
+注入内容与规则一是同一份完整《Assistant Operating Specification》（约 26K 字符、18 节），整体 `prepend` 到 thinking 块头部，作为模型思考开始前的行为规范上下文，原生思考过程完整保留在其后（响应方向无上游编码限制）。
 
 流式（SSE）与非流式两条响应路径都会被改写；SSE 路径按事件块缓冲处理，thinking 分片采用“延迟一片发射”以识别首片/尾片，`prepend` 只注入首片、`append` 只注入尾片。
 
@@ -230,9 +230,9 @@ Claude Code 的 `system` 数组结构：`system[0]` 为 billing 头、`system[1]
 
 正则设计：
 
-- **锚定段首** `IMPORTANT: Assist with`——该前缀是条款的稳定特征，其它 `IMPORTANT:` 段落不会被误删
-- **`[^\n]*` 吃满整行**——对段中措辞变化稳健，CC 升级改写中后段文字时规则仍生效
-- **连同尾随 `\n\n` 一起删除**——保持 "…along the way." 与 `# Harness` 之间的原有空行结构
+- **锚定段首** `IMPORTANT: Assist with`：该前缀是条款的稳定特征，其它 `IMPORTANT:` 段落不会被误删
+- **`[^\n]*` 吃满整行**：对段中措辞变化稳健，CC 升级改写中后段文字时规则仍生效
+- **连同尾随 `\n\n` 一起删除**：保持 "…along the way." 与 `# Harness` 之间的原有空行结构
 
 规则引擎按块独立应用文本操作，该前缀仅存在于 `system[2]`，其余 system 块不受影响。若 CC 未来重构该段（前缀变更或不再是单行），规则静默失效为 no-op，可对照请求记录刷新正则。
 

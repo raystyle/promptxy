@@ -94,7 +94,7 @@ console.log('\n== 请求侧：规则一（system 注入）+ 规则三（删除�
 }
 
 {
-  // 规则匹配面：pathRegex 为子串匹配，count_tokens 也命中（预期行为——
+  // 规则匹配面：pathRegex 为子串匹配，count_tokens 也命中（预期行为：
   // token 计数应反映改写后的请求体，避免 CC 低估上下文占用）
   const body = ccBody();
   const { body: out } = mutateClaudeBody({ body, method: 'POST', path: '/v1/messages/count_tokens', rules });
