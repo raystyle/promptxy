@@ -211,13 +211,9 @@ export GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:7070/gemini"
 | --- | --- |
 | 匹配 | `client=claude`、`field=thinking`（**响应侧**） |
 | 操作 | `prepend` 到 thinking 块头部 |
-| 语义 | 在模型思维链**开始处**注入一句话状态确认，模型原生思考过程完整保留 |
+| 语义 | 在模型思维链**开始处**注入完整《Assistant Operating Specification》，模型原生思考过程完整保留 |
 
-注入内容为一行状态标记（响应方向无编码限制，可用中文）：
-
-```
-[PromptXY 思维链注入] 状态确认：此段由响应侧 thinking 规则注入，规则引擎工作正常。
-```
+注入内容与规则一是同一份完整《Assistant Operating Specification》（约 26K 字符、18 节），整体 `prepend` 到 thinking 块头部——作为模型思考开始前的行为规范上下文，原生思考过程完整保留在其后（响应方向无上游编码限制）。
 
 流式（SSE）与非流式两条响应路径都会被改写；SSE 路径按事件块缓冲处理，thinking 分片采用“延迟一片发射”以识别首片/尾片，`prepend` 只注入首片、`append` 只注入尾片。
 
