@@ -92,6 +92,26 @@
       ],
       "stop": false,
       "enabled": true
+    },
+    {
+      "uuid": "px-cc-agent-safety-strip",
+      "name": "删除 CC agent 安全条款",
+      "description": "请求侧：删除 system[2]（CC agent 主提示词）中的安全条款段落。正则锚定段首 \"IMPORTANT: Assist with\"，匹配整行及尾随空行，对段中措辞变化稳健；仅该块含此文本，其它 system 块不受影响。",
+      "when": {
+        "client": "claude",
+        "field": "system",
+        "method": "POST",
+        "pathRegex": "/v1/messages"
+      },
+      "ops": [
+        {
+          "type": "delete",
+          "regex": "IMPORTANT: Assist with[^\\n]*\\n\\n",
+          "flags": "g"
+        }
+      ],
+      "stop": false,
+      "enabled": true
     }
   ],
   "storage": {

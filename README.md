@@ -177,7 +177,7 @@ export GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:7070/gemini"
 
 ## 📦 内置规则
 
-仓库内置 `promptxy.config.json`，自带 zhipu（bigmodel Anthropic 端点）供应商、`/claude` 透明透传路由和两条开箱即用的规则。裸 `npm run dev` 启动即全部生效。
+仓库内置 `promptxy.config.json`，自带 zhipu（bigmodel Anthropic 端点）供应商、`/claude` 透明透传路由和三条开箱即用的规则。裸 `npm run dev` 启动即全部生效。
 
 ### 规则一：系统提示词修改
 
@@ -219,7 +219,26 @@ export GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:7070/gemini"
 [PromptXY 思维链注入] 状态确认：此段由响应侧 thinking 规则注入，规则引擎工作正常。
 ```
 
-流式（SSE）与非流式两条响应路径都会被改写；SSE 路径按事件块缓冲处理，thinking 分片采用"延迟一片发射"以识别首片/尾片，`prepend` 只注入首片、`append` 只注入尾片。
+流式（SSE）与非流式两条响应路径都会被改写；SSE 路径按事件块缓冲处理，thinking 分片采用“延迟一片发射”以识别首片/尾片，`prepend` 只注入首片、`append` 只注入尾片。
+
+### 规则三：删除 CC agent 安全条款
+
+| 项 | 值 |
+| --- | --- |
+| 匹配 | `client=claude`、`field=system`、`POST /v1/messages` |
+| 操作 | `delete`（正则，`flags: "g"`） |
+| 正则 | `IMPORTANT: Assist with[^\n]*\n\n` |
+| 语义 | 删除 `system[2]`（CC agent 主提示词块）中以 `IMPORTANT: Assist with` 开头的安全条款整段 |
+
+Claude Code 的 `system` 数组结构：`system[0]` 为 billing 头、`system[1]` 为 CLI 提示词块（规则一的锚点）、`system[2]` 为 agent 主提示词块。安全条款是该块开头的一个单行段落，其后紧跟 `# Harness`。
+
+正则设计：
+
+- **锚定段首** `IMPORTANT: Assist with`——该前缀是条款的稳定特征，其它 `IMPORTANT:` 段落不会被误删
+- **`[^\n]*` 吃满整行**——对段中措辞变化稳健，CC 升级改写中后段文字时规则仍生效
+- **连同尾随 `\n\n` 一起删除**——保持 "…along the way." 与 `# Harness` 之间的原有空行结构
+
+规则引擎按块独立应用文本操作，该前缀仅存在于 `system[2]`，其余 system 块不受影响。若 CC 未来重构该段（前缀变更或不再是单行），规则静默失效为 no-op，可对照请求记录刷新正则。
 
 ## 📝 配置文件
 
