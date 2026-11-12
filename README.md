@@ -12,7 +12,7 @@
 
 拦截、修改、可视化 AI 服务请求 | 支持 Anthropic、OpenAI、Gemini
 
-[功能特性](#-核心功能) • [快速开始](#-快速开始) • [客户端接入](#-客户端接入透传代理) • [配置说明](#-配置文件)
+[功能特性](#-核心功能) • [快速开始](#-快速开始) • [客户端接入](#-客户端接入透传代理) • [内置规则](#-内置规则) • [配置说明](#-配置文件)
 
 </div>
 
@@ -171,7 +171,55 @@ export GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:7070/gemini"
 - **系统提示词修改**（请求侧，`field: system`）：在客户端原始系统提示词的基础上追加注入内容，原文保留不变
 - **思维链注入**（响应侧，`field: thinking`）：在模型思维链开始处注入内容，模型原生思考过程完整保留
 
+> 本仓库预置了这两条规则，详见[内置规则](#-内置规则)。
+
 所有规则可在 Web UI 中可视化编辑并用沙盒预览测试。
+
+## 📦 内置规则
+
+仓库内置 `promptxy.config.json`，自带 zhipu（bigmodel Anthropic 端点）供应商、`/claude` 透明透传路由和两条开箱即用的规则。裸 `npm run dev` 启动即全部生效。
+
+### 规则一：系统提示词修改
+
+| 项 | 值 |
+| --- | --- |
+| 匹配 | `client=claude`、`field=system`、`POST /v1/messages` |
+| 操作 | `replace`，锚点 `You are Claude Code, Anthropic's official CLI for Claude.` |
+| 语义 | 在 Claude Code 原始系统提示词块上**追加**注入内容，原文完整保留 |
+
+**注入内容**是一份《Assistant Operating Specification》（约 26K 字符、18 节），作为注入到 system 的工作规范文档，覆盖：
+
+```
+1. Role 角色定位        7. Reasoning 推理流程       13. Ambiguity/errors 不确定性处理
+2. Capabilities 能力    8. Agentic/tool use 工具    14. Context 上下文延续
+3. Core values 价值观   9. Editing conventions 编辑 15. Response quality 响应质量
+4. Domains 协作领域    10. Commands/verify 命令验证 16. Communication 沟通语气
+5. Safety policy 安全   11. Version control 版本控制 17. Session conduct 会话行为
+6. Refusal 拒答处理     12. Planning 多步规划        18. Identity 自我认知
+```
+
+它把默认 CLI 助手身份之上的一整套行为约束（安全策略、推理流程、工程规范、沟通标准）注入到每次请求的 system 里，从而系统性地改写模型的行为模式。
+
+**修改注入内容时必须遵守两条硬约束**（均为上游 bigmodel `/api/anthropic` 端点的行为）：
+
+1. **内容保持纯 ASCII**：上游会对 system 首个文本块做 ascii 编码，任何非 ASCII 字符（中文、`—`、`→`、弯引号等）都会触发 500
+2. **不能并入 system 首块**：首块以 `x-anthropic-billing-header:` 开头时会被上游特殊解析，大段内容合并进去会触发裸 400——因此规则用锚定 `replace` 只写入第二块（Claude Code 提示词块）
+
+### 规则二：思维链注入
+
+| 项 | 值 |
+| --- | --- |
+| 匹配 | `client=claude`、`field=thinking`（**响应侧**） |
+| 操作 | `prepend` 到 thinking 块头部 |
+| 语义 | 在模型思维链**开始处**注入一句话状态确认，模型原生思考过程完整保留 |
+
+注入内容为一行状态标记（响应方向无编码限制，可用中文）：
+
+```
+[PromptXY 思维链注入] 状态确认：此段由响应侧 thinking 规则注入，规则引擎工作正常。
+```
+
+流式（SSE）与非流式两条响应路径都会被改写；SSE 路径按事件块缓冲处理，thinking 分片采用"延迟一片发射"以识别首片/尾片，`prepend` 只注入首片、`append` 只注入尾片。
 
 ## 📝 配置文件
 
