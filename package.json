@@ -1,0 +1,87 @@
+{
+  "name": "promptxy",
+  "version": "2.1.7",
+  "type": "module",
+  "description": "PromptXY - HTTP 请求代理网关，支持 AI 服务提供商的请求拦截和修改",
+  "author": "ekko.bao",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BeGild/promptxy.git"
+  },
+  "bugs": {
+    "url": "https://github.com/BeGild/promptxy/issues"
+  },
+  "homepage": "https://github.com/BeGild/promptxy#readme",
+  "keywords": [
+    "http-proxy",
+    "ai-gateway",
+    "claude",
+    "openai",
+    "request-interception",
+    "llm-proxy"
+  ],
+  "bin": {
+    "promptxy": "./dist/cli-entry.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "tsx backend/src/main.ts",
+    "dev:all": "concurrently \"npm run dev\" \"cd frontend && npm run dev\" --names \"backend,frontend\" --prefix-colors \"blue,green\"",
+    "build": "npm run build:backend && npm run build:frontend && npm run postbuild:copy && npm run postbuild:shebang",
+    "build:backend": "tsc -p backend/tsconfig.json",
+    "build:frontend": "cd frontend && npm run build && cd ..",
+    "postbuild:copy": "mkdir -p dist/frontend && cp -r frontend/dist/* dist/frontend/ && cp -r backend/dist/* dist/",
+    "postbuild:shebang": "sed -i '1s/.*/#!\\/usr\\/bin\\/env node/' dist/cli-entry.js && chmod +x dist/cli-entry.js",
+    "start": "node dist/cli-entry.js",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run --root backend --config vitest.config.ts",
+    "test:frontend": "vitest run --root frontend --config vitest.config.ts",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --root backend --config vitest.config.ts --coverage",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "lint:backend": "cd backend && npm run lint",
+    "lint:backend:fix": "cd backend && npm run lint:fix",
+    "format:backend": "cd backend && npm run format",
+    "lint:frontend": "cd frontend && npm run lint",
+    "lint:frontend:fix": "cd frontend && npm run lint:fix",
+    "format:frontend": "cd frontend && npm run format",
+    "records": "node dist/records-query/cli.js"
+  },
+  "dependencies": {
+    "@musistudio/llms": "^1.0.51",
+    "js-yaml": "^4.1.1",
+    "node-cron": "^3.0.3",
+    "sqlite3": "^5.1.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.2",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^24.3.1",
+    "@types/node-cron": "^3.0.11",
+    "@types/sqlite3": "^3.1.11",
+    "@typescript-eslint/eslint-plugin": "^8.50.0",
+    "@typescript-eslint/parser": "^8.50.0",
+    "@vitest/coverage-v8": "^4.0.16",
+    "concurrently": "^9.2.1",
+    "eslint": "^9.39.2",
+    "eslint-config-prettier": "^9.1.2",
+    "eslint-plugin-prettier": "^5.5.4",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "jsdom": "^27.4.0",
+    "prettier": "^3.7.4",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.2",
+    "vitest": "^4.0.16"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

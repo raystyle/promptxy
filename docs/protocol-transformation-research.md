@@ -1,0 +1,1109 @@
+# PromptXY 协议转换功能调研文档
+
+**文档版本**: v1.1
+**创建日期**: 2025-01-01
+**最后更新**: 2026-01-01
+**调研人员**: Claude AI（初稿）/ PromptXY 团队（修订）
+**文档类型**: 技术调研 / 技术方案（面向实现）
+**后续状态**: 待 Review（确认后进入提案/实现）
+
+---
+
+## 目录
+
+1. [调研背景与目标](#1-调研背景与目标)
+2. [当前项目现状分析](#2-当前项目现状分析)
+3. [参考项目研究](#3-参考项目研究)
+4. [技术方案设计](#4-技术方案设计)
+5. [可视化界面设计](#5-可视化界面设计)
+6. [实施计划](#6-实施计划)
+7. [风险评估与缓解](#7-风险评估与缓解)
+8. [附录](#8-附录)
+
+---
+
+## 1. 调研背景与目标
+
+### 1.1 背景描述
+
+PromptXY 项目当前是一个本地 HTTP 网关，支持对 Claude Code、Codex CLI、Gemini CLI 等客户端的请求进行内容修改（如提示词改写）。项目已具备：
+
+- 多供应商请求转发能力
+- 规则引擎（PromptXY Rules）用于内容修改
+- 可视化配置界面
+- 请求历史记录与预览
+
+### 1.2 需求来源
+
+用户希望为项目添加**协议转换功能**，实现以下目标：
+
+1. **统一入口**: 接收 Claude Code 发送的符合 Anthropic 协议的请求
+2. **协议转换**: 将 Anthropic 协议转换为不同供应商的协议格式
+3. **解耦设计**: 方便对接新的供应商，无需修改核心代码
+4. **可视化展示**: 通过画布形式展示协议转换前后的映射关系
+
+### 1.3 调研目标
+
+1. 研究参考项目 `claude-code-router` 的协议转换实现
+2. 分析 Anthropic 协议与主流供应商协议的差异
+3. 设计解耦的协议转换架构
+4. 设计“可验证/预览/trace”为主的可视化方案（画布映射作为 v2+ 可选增强）
+5. 评估技术选型与实施风险
+
+### 1.4 范围与约束（v1 明确边界）
+
+为避免“先做复杂路由/编排导致项目失焦”，本期协议转换（v1）明确如下边界：
+
+- **单一 localPrefix ⇄ 单一 Supplier（保持现状）**  
+  `localPrefix` 表达的是 PromptXY 对 AI 工具暴露的网关路径前缀。当前实现已强制校验：同一个 `localPrefix` 不能被多个 *enabled* supplier 同时使用（见 `backend/src/promptxy/config.ts` 的校验逻辑）。
+- **不引入 Router / 不做多供应商选择策略**  
+  本期只实现“协议转换层”能力；路由策略（按任务场景/模型/脚本）属于后续扩展。
+  - v1 的“统一入口”指：PromptXY 对下游暴露 **Claude Code/Anthropic 协议兼容** 的统一入口；在命中 `localPrefix` 后，仅转换并转发到该 supplier（单上游），不做多上游选择。
+- **模型匹配只做精确匹配（exact match）**  
+  `transformer.models` 的 key 仅支持精确匹配 model 字符串；不支持 regex/通配，便于验证与 UI 编辑。
+- **配置不直接复用 `@musistudio/llms` 配置**  
+  PromptXY 定义自己的配置结构；运行时通过“兼容层”编译/适配到 `@musistudio/llms` 的调用方式。
+- **PromptXY 需要存储供应商密钥（token/key）**  
+  原有“完全透传认证头、不存储密钥”的模式将不再满足“统一入口 + 协议转换”的目标。v1 方向是：PromptXY 对内提供统一的 URL 与 token，按 supplier 注入上游认证信息（类似 claude-code-router 的使用体验）。
+  - 备注：这会与现有用户文档中“promptxy 不存储密钥”的表述产生冲突，进入实现阶段时需要同步更新相关文档与 UI 提示。
+
+---
+
+## 2. 当前项目现状分析
+
+### 2.1 项目结构
+
+```
+promptxy/
+├── backend/
+│   └── src/promptxy/
+│       ├── adapters/           # 现有：客户端适配器
+│       │   ├── claude.ts       # Claude 内容适配
+│       │   ├── codex.ts        # Codex 内容适配
+│       │   └── gemini.ts       # Gemini 内容适配
+│       ├── gateway.ts          # 网关核心
+│       ├── rules/              # 规则引擎
+│       ├── types.ts            # 类型定义
+│       └── ...
+├── frontend/
+│   └── src/
+│       ├── components/
+│       │   ├── request-viewer/ # 请求查看器
+│       │   ├── rules/          # 规则管理
+│       │   └── suppliers/      # 供应商管理
+│       └── ...
+└── docs/
+```
+
+### 2.2 现有能力
+
+#### 2.2.1 适配器（Adapters）
+
+当前 `adapters/` 目录下的文件主要用于**内容修改**，而非**协议转换**：
+
+```typescript
+// adapters/claude.ts - 仅修改 system 字段内容
+export function mutateClaudeBody(options: {
+  body: any;
+  method: string;
+  path: string;
+  rules: PromptxyRule[];
+}): { body: any; matches: PromptxyRuleMatch[] }
+```
+
+**关键发现**: 现有适配器只修改请求体中的字段值（如 `system` 提示词），不处理协议格式转换。
+
+#### 2.2.2 供应商（Suppliers）
+
+```typescript
+// types.ts - 当前 Supplier 配置
+export interface Supplier {
+  id: string;
+  name: string;
+  baseUrl: string;              // 上游地址
+  localPrefix: string;          // 本地路径前缀（如 /claude）
+  pathMappings?: PathMapping[]; // 路径映射
+  enabled: boolean;
+}
+```
+
+**关键发现**:
+- 已有 Supplier 概念、路径映射概念、以及本地前缀（localPrefix）概念。
+- 当前 supplier 配置 **不包含密钥**（token/key）与协议转换配置（transformer）。
+
+#### 2.2.3 网关流程
+
+当前网关（`backend/src/promptxy/gateway.ts`）的实际行为可归纳为：
+
+1. **API 与静态资源优先处理**：`/_promptxy/*` 与前端静态资源在代理之前处理。
+2. **按路径查找供应商**：在 *enabled suppliers* 中按 `localPrefix` **长度倒序**匹配（更长的前缀优先）。
+3. **推断 client 类型**（现实现）：  
+   - 前缀以 `/codex` 开头 → `codex`  
+   - 前缀以 `/gemini` 开头 → `gemini`  
+   - 其他 → `claude`
+4. **构造上游 URL**：  
+   - `upstreamPath = stripPrefix(url.pathname, localPrefix)`  
+   - `upstreamPath = applyPathMappings(upstreamPath, supplier.pathMappings)`  
+   - `upstreamUrl = joinUrl(supplier.baseUrl, upstreamPath, url.search)`
+5. **读取并解析请求体（如果是 JSON）**：`Content-Type` 看起来是 JSON 才尝试 parse；parse 失败保持透传。
+6. **应用内容修改（rules）**：按 client 调用 `mutateClaudeBody / mutateCodexBody / mutateGeminiBody`。
+7. **转发到上游**：`fetch(upstreamUrl)`，并把上游响应 **流式 pipe** 给客户端；同时收集响应片段用于历史记录。
+
+**关键结论（对本方案影响很大）**：
+- 网关当前是“边转发边记录”的流式管道模型；引入“协议转换（尤其是 SSE）”后，响应侧很可能需要从“直接 pipe”升级为“边解析边重写再输出”。
+- 现有流程中，协议转换层最自然的插入点在 **rules（内容修改）之后、fetch 之前**。
+
+### 2.3 现有局限性
+
+| 局限点 | 描述 |
+|--------|------|
+| **协议格式固定** | 假设上游使用与客户端相同的协议格式 |
+| **字段结构差异** | 无法处理 tools、streaming 等格式差异 |
+| **无转换追踪** | 缺少协议转换过程的可视化展示 |
+| **扩展性** | 添加新供应商需要修改核心代码 |
+| **认证模式受限** | 当前强调“仅透传认证头、不存储密钥”，难以提供“统一入口 + 协议转换（转发到上游）”的体验 |
+
+---
+
+## 3. 参考项目研究
+
+### 3.1 项目概述
+
+**项目名称**: claude-code-router
+**GitHub**: https://github.com/musistudio/claude-code-router
+**核心功能**: 将 Claude Code 请求路由到不同 LLM 供应商
+**关键依赖**: `@musistudio/llms` (协议转换核心库)
+
+### 3.2 架构分析
+
+#### 3.2.1 整体架构
+
+```
+Claude Code
+    ↓ (Anthropic 协议)
+claude-code-router
+    ↓ (使用 @musistudio/llms 转换)
+不同供应商 API
+```
+
+#### 3.2.2 核心组件
+
+**1. Transformer 系统**
+
+```typescript
+// 配置示例
+{
+  "Providers": [
+    {
+      "name": "deepseek",
+      "api_base_url": "https://api.deepseek.com/chat/completions",
+      "api_key": "sk-xxx",
+      "models": ["deepseek-chat", "deepseek-reasoner"],
+      "transformer": {
+        "use": ["deepseek"],                    // 全局转换器
+        "deepseek-chat": {
+          "use": ["tooluse"]                    // 模型特定转换器
+        }
+      }
+    }
+  ]
+}
+```
+
+**特点**:
+- 支持链式转换器组合
+- 可为不同模型配置不同转换器
+- 支持传递选项给转换器
+
+**2. 路由系统**
+
+```typescript
+// Router 配置
+{
+  "Router": {
+    "default": "deepseek,deepseek-chat",        // 默认模型
+    "background": "ollama,qwen2.5-coder:latest", // 后台任务
+    "think": "deepseek,deepseek-reasoner",       // 思考任务
+    "longContext": "openrouter,gemini-2.5-pro",  // 长上下文
+    "longContextThreshold": 60000,               // 触发阈值
+    "webSearch": "gemini,gemini-2.5-flash"       // 网络搜索
+  }
+}
+```
+
+**特点**:
+- 基于场景的模型路由
+- 支持动态模型切换（通过 `/model` 命令）
+- 支持自定义路由脚本
+
+**3. Agent 系统**
+
+```typescript
+// agents/type.ts
+export interface IAgent {
+  name: string;
+  tools: Map<string, ITool>;
+  shouldHandle: (req: any, config: any) => boolean;
+  reqHandler: (req: any, config: any) => void;
+  resHandler?: (payload: any, config: any) => void;
+}
+```
+
+**特点**:
+- 用于处理特殊请求（如图像）
+- 可注入自定义工具
+- 支持请求/响应拦截
+
+#### 3.2.3 SSE 流处理
+
+```typescript
+// utils/SSEParser.transform.ts
+export class SSEParserTransform extends TransformStream<string, any> {
+  // 解析 SSE 事件流
+  // 支持 event:、data:、id:、retry: 字段
+}
+
+// utils/SSESerializer.transform.ts
+export class SSESerializerTransform extends TransformStream<any, string> {
+  // 序列化为 SSE 格式
+}
+```
+
+**关键发现**: 完整的 SSE 双向转换能力。
+
+### 3.3 支持的供应商
+
+| 供应商 | Transformer | 支持状态 |
+|--------|-------------|----------|
+| DeepSeek | `deepseek` | ✅ 完整支持 |
+| Gemini | `gemini` | ✅ 完整支持 |
+| Gemini CLI | `gemini-cli` | ✅ 实验性支持 |
+| OpenRouter | `openrouter` | ✅ 完整支持 |
+| Ollama | 默认（OpenAI 格式） | ✅ 完整支持 |
+| Volcengine | `deepseek` | ✅ 完整支持 |
+| Groq | `groq` | ✅ 完整支持 |
+| Azure OpenAI | 内置 | ✅ 原生支持 |
+| 自定义 API | 自定义 transformer | ✅ 可扩展 |
+
+### 3.4 核心依赖：@musistudio/llms
+
+#### 3.4.1 基本信息
+
+- **包名**: `@musistudio/llms`
+- **版本记录（调研时点）**: 截至 2025-12-18 已发布 1.0.51
+- **仓库**: https://github.com/musistudio/llms
+- **描述**: A universal LLM API transformation server
+- **许可证**: MIT
+
+#### 3.4.2 能力分析
+
+**核心功能**:
+1. 统一的 LLM API 接口
+2. 供应商协议转换
+3. Transformer 注册与组合
+4. Fastify 集成（hooks 和中间件）
+5. SSE 流式响应转换
+
+**Transformer 列表**:
+
+| Transformer | 功能 |
+|-------------|------|
+| `anthropic` | Anthropic 原始协议（透传） |
+| `deepseek` | DeepSeek API 格式转换 |
+| `gemini` | Gemini API 格式转换 |
+| `gemini-cli` | Gemini CLI 特殊格式 |
+| `openrouter` | OpenRouter API（含 provider 路由） |
+| `groq` | Groq API 格式转换 |
+| `maxtoken` | 设置 max_tokens 值 |
+| `tooluse` | 优化工具调用 |
+| `reasoning` | 处理推理内容 |
+| `sampling` | 处理采样参数 |
+| `enhancetool` | 工具调用错误容忍 |
+| `cleancache` | 清除 cache_control 字段 |
+| `vertex-gemini` | Vertex AI Gemini |
+| `chutes-glm` | GLM 4.5 支持 |
+| `qwen-cli` | Qwen CLI 支持 |
+| `rovo-cli` | Rovo Dev CLI 支持 |
+
+**关键发现**:
+- ✅ **覆盖全面**: 支持 DeepSeek、Gemini、OpenRouter 等主流供应商
+- ✅ **活跃维护**: 截至 2025-12 仍有版本发布
+- ✅ **可扩展**: 支持自定义 Transformer
+- ✅ **SSE 支持**: 完整的流式响应转换
+
+---
+
+## 4. 技术方案设计
+
+### 4.1 整体架构
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         PromptXY 项目架构                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │                    前端可视化层 (React + Tailwind)               │    │
+│  │  • 供应商配置管理    • 协议预览    • 转换日志展示                 │    │
+│  └─────────────────────────────────────────────────────────────────┘    │
+│                                    ↓                                     │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │              PromptXY 网关 (Node.js + TypeScript)                │    │
+│  │  • 规则引擎        • 请求记录    • 路径映射                       │    │
+│  │  • 新增: 协议转换编排    • Transformer 配置 / Supplier Auth 注入   │    │
+│  └─────────────────────────────────────────────────────────────────┘    │
+│                                    ↓                                     │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │          协议转换层（PromptXY 配置 + llms 兼容层）               │    │
+│  │  • Anthropic → OpenAI (DeepSeek, Groq, etc.)                   │    │
+│  │  • Anthropic → Gemini                                          │    │
+│  │  • Anthropic → 自定义 (扩展 Transformer)                        │    │
+│  └─────────────────────────────────────────────────────────────────┘    │
+│                                    ↓                                     │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │                      上游供应商 API                              │    │
+│  └─────────────────────────────────────────────────────────────────┘    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 4.2 目录结构设计
+
+```
+backend/src/promptxy/
+├── transformers/                 # 新增: 协议转换模块
+│   ├── index.ts                 # 导出入口
+│   ├── llms-compat.ts           # @musistudio/llms 兼容/适配层（编译 PromptXY 配置）
+│   ├── registry.ts              # 转换器注册表
+│   ├── types.ts                 # 转换器类型定义
+│   ├── anthropic/               # Anthropic 协议相关
+│   │   ├── types.ts             # Anthropic 类型定义
+│   │   ├── parser.ts            # 请求/响应解析
+│   │   └── validator.ts         # 协议验证
+│   ├── openai/                  # OpenAI 兼容协议
+│   │   ├── transformer.ts       # OpenAI 转换器包装
+│   │   ├── sse.ts               # SSE 流转换
+│   │   └── types.ts             # OpenAI 类型定义
+│   ├── gemini/                  # Gemini 协议
+│   │   ├── transformer.ts       # Gemini 转换器包装
+│   │   ├── sse.ts               # SSE 流转换
+│   │   └── types.ts             # Gemini 类型定义
+│   └── custom/                  # 自定义转换器
+│       ├── base.ts              # 自定义转换器基类
+│       ├── gemini-cli.ts        # Gemini CLI 特殊处理
+│       └── registry.ts          # 自定义转换器注册
+├── adapters/                    # 保留: 内容修改层
+├── gateway.ts                   # 修改: 集成协议转换
+├── types.ts                     # 扩展: 新增协议相关类型
+└── config.ts                    # 扩展: supplier auth / transformer 配置校验
+```
+
+### 4.3 核心类型设计
+
+#### 4.3.1 Supplier 扩展
+
+v1 决策：废弃 `protocolType`，统一用 `transformer` 决定转换逻辑。
+
+Supplier 在现有字段基础上扩展两类能力：**认证信息（auth）**与**转换链（transformer）**。
+
+**Supplier 新增字段（结构说明）**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `auth` | object | 否（建议启用转换时必填） | PromptXY 存储并注入上游认证信息 |
+| `transformer` | object | 否 | 协议转换配置（PromptXY 自定义结构） |
+
+**auth 建议结构（v1）**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `type` | `"bearer"` \| `"header"` | 是 | 认证注入方式 |
+| `token` | string | `bearer` 时是 | 将注入为 `Authorization: Bearer <token>` |
+| `headerName` | string | `header` 时是 | 自定义 header 名称 |
+| `headerValue` | string | `header` 时是 | 自定义 header 值 |
+
+> 安全要求：UI 展示时必须脱敏；请求历史与日志不得落盘明文 token（见第 7 章）。
+>
+> 注：为实现“对内统一 token、对外使用 supplier key”的体验，网关在转发上游时应以 `supplier.auth` 为准，**覆盖/替换**客户端传入的认证头（而不是透传）。客户端的 token 可以仅用于满足其 CLI/SDK 的必填字段或作为本地鉴权（后者可在后续版本扩展）。
+
+**transformer 显式结构（v1 / 精确匹配）**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `default` | `chain` | 是 | 默认转换链 |
+| `models` | `{ [model: string]: chain }` | 否 | model 精确匹配覆盖链 |
+
+其中 `chain` 是数组，元素为：
+- `"<transformerName>"`（不带 options）
+- `{ "name": "<transformerName>", "options": { ... } }`（带 options）
+
+#### 4.3.2 转换器接口
+
+调研结论：转换器在 v1 需要覆盖三类能力即可满足落地：
+
+1. **请求转换**：把“进入 PromptXY 的请求协议”（优先以 Claude Code/Anthropic Messages 为主）转换为上游协议（OpenAI compatible/Gemini 等）。
+2. **响应转换**：把上游响应转换回“对 Claude Code 入口可用的协议”（Anthropic）。
+3. **流式转换（可选）**：若上游使用 SSE/流式 chunk，需逐事件或逐 chunk 转换；该能力与网关当前“直接 pipe”模型存在冲突，需要单独评估与实现。
+
+实现层面的接口形态可以由 `registry + compat layer` 约束，不在调研文档中绑定具体 TypeScript 接口细节，以避免过早锁死实现。
+
+#### 4.3.3 映射节点类型（用于可视化）
+
+v1 重点是把“可验证的转换结果”交付出来。映射可视化（画布）属于增强能力，建议将可视化数据收敛到两类输出：
+
+- **转换 trace（强需求 / v1）**：以“步骤列表 + warnings/errors”的形式输出（用于调试与验证 UI）。  
+  例如：命中 default 还是某个 model override；链上每一步的输入/输出摘要；关键字段差异；工具调用兼容性提示等。
+- **映射关系（弱需求 / v1 可选）**：仅在成本可控且能确保正确性的前提下提供。  
+  避免为了画布而强行构造“字段级映射图”，导致实现复杂度与维护成本急剧上升。
+
+因此，v1 建议优先定义 trace 的数据结构与 API（见第 6 章阶段 2），画布结构（树/图节点类型）留作 v2+ 再完善。
+
+### 4.4 网关集成方案
+
+#### 4.4.1 请求处理流程
+
+在不引入 router 的前提下，协议转换层的插入点建议为（对齐现网关实现）：
+
+1. **路由/路径处理**：保持现状（按 `localPrefix` 匹配、stripPrefix、pathMappings、joinUrl）。
+2. **网关入站鉴权（新增）**：校验 `gatewayAuth` token（尽早失败，且通过后清理入站鉴权 header）。
+3. **读取/解析 JSON 请求体**：保持现状（尽量不改变“parse 失败透传”的行为）。
+4. **内容修改（rules/adapters）**：保持现状（按 client 选择 mutate 逻辑）。
+5. **协议转换（新增）**：对 JSON body 做协议转换；并产生 trace（链选择、步骤摘要、warnings/errors）。
+6. **上游认证注入（新增）**：按 `suppliers[].auth` 注入或覆盖上游认证头（客户端 token 不应透传到上游）。
+7. **fetch 转发**：基本保持现状；若需要对响应做转换（尤其是 SSE），响应侧将不能继续简单 pipe。
+
+> v1 建议优先打通“请求侧转换 + 非流式响应转换”，并预留流式转换的实现空间。
+
+#### 4.4.2 SSE 流转换
+
+SSE/流式响应转换是“协议转换”的难点之一，且与现网关的“直接 pipe”模型冲突。
+
+v1 需要在方案中明确两点实现要点（不展开代码）：
+
+1. **不能盲目 pipe**：一旦需要对流式事件做转换，就必须“解析 → 转换 → 序列化 → 写回”。
+2. **事件粒度差异**：Anthropic 与 OpenAI 的流式事件模型不同（见附录 8.1），转换可能需要维护状态（例如 tool 调用的分片聚合）。
+
+### 4.5 转换器注册表
+
+注册表（registry）的职责是“把配置里声明的 chain 编译成可执行的转换 pipeline”，并提供：
+
+- 转换器存在性校验（用于“配置可验证”）
+- `default` 链与 `models[model]` 精确匹配覆盖链
+- trace 输出（用于 UI/排障）：链选择结果 + 步骤摘要 + warnings/errors
+
+运行时链选择规则（v1 / 精确匹配）：
+
+1. 如果请求里存在 `model` 且 `transformer.models[model]` 存在 → 使用覆盖链
+2. 否则使用 `transformer.default`
+
+实现上建议将“PromptXY 自定义配置”交给 `llms-compat` 编译为 `@musistudio/llms` 的调用方式，从而隔离 llms 的 config/版本变动。
+
+### 4.6 配置示例
+
+```json
+{
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 3888
+  },
+  "gatewayAuth": {
+    "enabled": true,
+    "token": "pxy_xxx",
+    "acceptedHeaders": ["x-api-key", "authorization", "x-goog-api-key"]
+  },
+  "suppliers": [
+    {
+      "id": "claude-entry",
+      "name": "Claude Code 统一入口（转 OpenAI 兼容上游）",
+      "baseUrl": "https://api.deepseek.com",
+      "localPrefix": "/claude",
+      "enabled": true,
+      "auth": {
+        "type": "bearer",
+        "token": "sk_upstream_xxx"
+      },
+      "transformer": {
+        "default": ["deepseek"],
+        "models": {
+          "deepseek-chat": [
+            "deepseek",
+            { "name": "tooluse", "options": { "mode": "strict" } }
+          ]
+        }
+      },
+      "pathMappings": [
+        { "from": "/v1/messages", "to": "/chat/completions", "type": "exact" }
+      ]
+    }
+  ],
+  "rules": [],
+  "storage": {
+    "maxHistory": 1000
+  },
+  "debug": true
+}
+```
+
+说明：
+- `gatewayAuth.token`：网关入站鉴权 token（对内统一；AI 工具访问本地网关必须携带）。  
+- `suppliers[].auth.token`：上游供应商密钥（对外；由 PromptXY 注入/覆盖，客户端不需要知道）。  
+- `gatewayAuth.acceptedHeaders`：仅声明“从哪些 **客户端原生会发送** 的鉴权头中读取网关 token”。v1 不要求客户端增加自定义 header；该列表应以真实客户端行为（尤其是 Claude Code）为准并尽量收敛。
+
+### 4.7 配置可验证策略（必须具备）
+
+“协议转换”属于高耦合、高出错成本的能力：一旦配置错了，用户看到的往往只是“请求失败/流异常/工具不可用”。因此 v1 必须把“可验证”作为一等能力设计，而不是事后补救。
+
+建议把可验证拆成三层（从强到弱）：
+
+1. **启动时静态校验（hard fail）**  
+   - transformer 配置结构合法（`default/models`、chain step 结构、options 类型等）  
+   - 转换器名称存在（registry 可列出可用 transformer）  
+   - model 覆盖仅允许精确匹配（v1 约束），避免不可预测匹配规则  
+   - auth 配置完整且可注入（例如 bearer 必须有 token）  
+2. **运行时诊断（soft fail + 可观测）**  
+   - 发生转换错误时，返回“可定位”的错误信息：包含 supplier、命中链（default / 某 model override）、失败步骤、简短原因  
+   - debug 模式下输出 trace 概要（不得包含明文 token）  
+3. **交互式验证（UI/接口）**  
+   - 提供“预览/验证”能力：输入示例请求，输出  
+     - rules 后请求  
+     - 转换后上游请求（headers/body，敏感字段默认脱敏）  
+     - trace/warnings/errors  
+
+> 这三层能力共同保证：配置错误能在最早阶段暴露；问题发生时能快速定位；用户可自助验证与回归。
+
+### 4.8 网关入站鉴权（Gateway Auth，v1 计划）
+
+由于 v1 目标是“对内统一 URL+token，并在命中 supplier 后将请求转换并转发到该上游”，因此 PromptXY 必须支持**网关入站鉴权**：
+
+- **目的**：防止本机/局域网中的其它进程直接滥用本地网关；同时把“对内 token”与“对外上游密钥”解耦。
+- **原则**：入站 token 只用于访问 PromptXY，本质上是“网关鉴权”；上游密钥只用于访问供应商 API，本质上是“供应商鉴权”。
+
+#### 4.8.1 建议配置结构
+
+在 `PromptxyConfig` 顶层增加 `gatewayAuth`：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `enabled` | boolean | 是 | 是否启用入站鉴权（建议默认 true） |
+| `token` | string | `enabled=true` 时是 | 入站鉴权 token |
+| `acceptedHeaders` | string[] | 否 | 接受 token 的请求头列表（便于兼容不同 CLI） |
+
+#### 4.8.2 token 传递方式（兼容不同客户端）
+
+由于不同 AI 工具/SDK 对“可自定义鉴权头”的能力不同，v1 建议同时支持多种 header 来源（由 `acceptedHeaders` 控制）：
+
+- **硬约束（v1）**：不引入任何 Claude Code 侧自定义 header/字段；PromptXY 必须仅使用 Claude Code 协议与其原生会发送的鉴权头来完成入站鉴权。  
+- **Claude/Anthropic 客户端**：可能会发送 `x-api-key`（通常可把网关 token 配置到其 API key 位置）  
+- **OpenAI/Codex 客户端**：可能会发送 `Authorization: Bearer <token>`  
+- **Gemini 客户端**：可能会发送 `x-goog-api-key`  
+
+> 重要说明：由于 v1 默认不将入站 request headers 落盘（避免 token/secret 写入本地文件），仅凭请求样例 fixture 不能推断 Claude Code 的鉴权头名。`acceptedHeaders` 的默认值应通过运行时观测（仅记录“header 名称/存在性”，不记录值）确认后再收敛到最小集合。
+
+校验策略建议为：
+1. 在命中 supplier（`localPrefix`）后、处理 body 前执行 token 校验（尽早失败，减少资源消耗）。
+2. token 校验通过后，**必须清理入站鉴权相关 header**，避免误传给上游。
+3. 转发到上游时，必须以 `suppliers[].auth` 为准 **注入/覆盖**上游认证头。
+
+---
+
+## 5. 可视化界面设计
+
+### 5.1 设计目标
+
+v1 的 UI 重点从“画布映射（重解释）”调整为“可验证（可落地）”，优先让用户能：
+
+1. **验证配置**：当前 supplier 的 transformer 链是否可用、是否命中 model override
+2. **预览转换**：输入一份示例请求，看到“rules 后请求”“转换后上游请求（含 auth 注入结果）”
+3. **查看 trace**：转换链逐步执行摘要 + warnings/errors（用于排障）
+
+画布式映射可视化可作为后续增强（v2+），避免为了画布定义复杂映射数据结构而推高 v1 成本。
+
+### 5.2 整体布局
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  PromptXY - 协议转换实验室                    [供应商▼] [模型▼] [全屏] [导出]      │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                 │
+│  ┌──────────────────────────┐ ┌──────────────────────────┐ ┌───────────────┐  │
+│  │ 示例请求（Claude/Anthropic）│ │ 上游请求预览（默认脱敏）   │ │ Trace / 告警     │  │
+│  │ - 选择 fixture             │ │ - method/path/headers      │ │ - 命中链(default/│  │
+│  │ - 编辑 JSON body           │ │ - body diff / 高亮变更      │ │   model override)│  │
+│  │ - stream on/off            │ │ - 一键复制（cURL / JSON）   │ │ - 步骤耗时/错误    │  │
+│  │ [运行] [重置] [保存样例]    │ │ [复制] [展开]              │ │ [复制trace]       │  │
+│  └──────────────────────────┘ └──────────────────────────┘ └───────────────┘  │
+│                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+> 注：v1 默认交付“验证/预览/trace 工作台”。画布式映射（React Flow）仅作为 v2+ 的可选高级视图：在 trace/映射数据稳定且可解释性足够时再引入。
+
+### 5.3 前端目录结构
+
+```
+frontend/src/
+├── components/
+│   ├── protocol-canvas/           # 协议实验室（可选画布视图）
+│   │   ├── ProtocolCanvas.tsx     # 主画布组件
+│   │   ├── canvas/
+│   │   │   ├── CanvasBackground.tsx   # 网格背景
+│   │   │   ├── CanvasControls.tsx     # 缩放/平移控制
+│   │   │   └── CanvasMiniMap.tsx      # 小地图导航
+│   │   ├── nodes/
+│   │   │   ├── ProtocolNode.tsx       # 协议节点容器
+│   │   │   ├── FieldNode.tsx          # 字段节点
+│   │   │   ├── ArrayNode.tsx          # 数组类型节点
+│   │   │   └── ObjectNode.tsx         # 对象类型节点
+│   │   ├── edges/
+│   │   │   ├── MappingEdge.tsx        # 映射连线
+│   │   │   ├── EdgeLabel.tsx          # 连线标签
+│   │   │   └── EdgeAnimation.tsx      # 数据流动画
+│   │   ├── panels/
+│   │   │   ├── SourcePanel.tsx        # 源协议面板
+│   │   │   ├── TargetPanel.tsx        # 目标协议面板
+│   │   │   └── DetailPanel.tsx        # 详情面板
+│   │   ├── overlays/
+│   │   │   ├── TransformerOverlay.tsx # 转换器提示
+│   │   │   └── ValidationOverlay.tsx  # 验证提示
+│   │   └── hooks/
+│   │       ├── useCanvasLayout.ts     # 布局计算
+│   │       ├── useNodeInteraction.ts  # 节点交互
+│   │       ├── useTransformPreview.ts # 转换预览
+│   │       └── useProtocolMapping.ts  # 协议映射/trace 数据（可选）
+│   ├── suppliers/
+│   │   ├── SupplierList.tsx           # 供应商列表
+│   │   ├── SupplierForm.tsx           # 供应商表单
+│   │   └── TransformerSelector.tsx    # 转换器选择器
+│   └── protocol-lab/                  # 协议实验室页面
+│       ├── ProtocolLab.tsx            # 主页面
+│       └── TestDataEditor.tsx         # 测试数据编辑器
+├── pages/
+│   ├── suppliers.tsx                  # 供应商管理页面
+│   └── protocol-lab.tsx               # 协议实验室页面
+└── api/
+    └── transformers.ts                # Transformer API
+```
+
+### 5.4 技术选型
+
+| 功能 | 技术选择 | 理由 |
+|------|----------|------|
+| **画布核心（可选）** | React Flow (@xyflow/react) | 专为节点图设计，API丰富，文档完善 |
+| **动画（可选）** | Framer Motion | 流畅的过渡动画，与 React 生态集成良好 |
+| **状态管理** | Zustand | 轻量级，适合组件级状态 |
+| **树布局** | d3-hierarchy | 成熟的树布局算法 |
+| **JSON 路径** | jsonpath-plus | 完整的 JSONPath 支持 |
+
+**核心依赖**:
+
+```json
+{
+  "dependencies": {
+    "@xyflow/react": "^11.10.0",
+    "framer-motion": "^11.0.0",
+    "zustand": "^4.5.0",
+    "d3-hierarchy": "^3.1.2",
+    "jsonpath-plus": "^8.0.0"
+  }
+}
+```
+
+### 5.5 交互设计
+
+#### 5.5.1 交互行为
+
+| 操作 | 效果 |
+|------|------|
+| **点击节点** | 高亮节点及其所有关联连线 |
+| **点击连线** | 在详情面板显示转换逻辑 |
+| **双击对象节点** | 展开/折叠子节点 |
+| **拖拽节点** | 调整节点位置（仅手动布局模式；自动布局模式下不自动“反拽回去”） |
+| **滚轮** | 以鼠标为中心缩放画布 |
+| **拖拽画布** | 平移视图 |
+| **悬停连线** | 显示转换逻辑 tooltip |
+| **悬停警告** | 显示问题说明 |
+
+#### 5.5.2 连线样式
+
+| 转换类型 | 颜色 | 线型 | 动画 |
+|----------|------|------|------|
+| `direct` | 蓝色 (#3b82f6) | 实线 | 流动 |
+| `rename` | 蓝色 (#3b82f6) | 实线 | 流动 |
+| `transform` | 琥珀色 (#f59e0b) | 虚线 | 流动 |
+| `conditional` | 紫色 (#8b5cf6) | 点线 | 无 |
+| `error` | 红色 (#ef4444) | 实线 | 无 |
+| `unmapped` | 灰色虚线框 | — | — |
+
+#### 5.5.3 节点样式
+
+```typescript
+// 节点状态样式映射
+const nodeStyles = {
+  mapped: {
+    border: 'border-blue-300',
+    background: 'bg-white',
+  },
+  unmapped: {
+    border: 'border-dashed border-gray-300',
+    background: 'bg-gray-50',
+  },
+  warning: {
+    border: 'border-amber-400',
+    background: 'bg-amber-50',
+  },
+  error: {
+    border: 'border-red-400',
+    background: 'bg-red-50',
+  },
+  deprecated: {
+    opacity: 'opacity-60',
+  },
+};
+```
+
+---
+
+## 6. 实施计划
+
+### 6.1 阶段划分
+
+#### 阶段 1: 后端协议转换基础 (2-3 周)
+
+**目标**: 实现核心协议转换功能（含 supplier auth 注入与配置校验）
+
+**任务**:
+1. 集成 `@musistudio/llms` 依赖
+2. 创建 `transformers/` 模块结构
+3. 实现 TransformerRegistry
+4. 实现 llms-compat（将 PromptXY transformer 配置编译为 llms 调用）
+5. 扩展 Supplier 配置：增加 `auth` 与 `transformer`（显式结构，model 精确匹配）
+6. 修改 gateway.ts：在 rules 后插入协议转换；并按 supplier 注入认证头
+7. 实现基础测试（Anthropic ↔ OpenAI compatible；含 auth 注入与 model 覆盖）
+
+**验收标准**:
+- [ ] 可以将 Claude Code 请求转换为 DeepSeek API 格式
+- [ ] 可以正确转换响应
+- [ ] supplier auth 可用且不会在日志/历史中泄漏明文 token
+- [ ] model 精确匹配覆盖链生效
+- [ ] （可选）支持 SSE 流式转换（若纳入 v1 范围，则作为单独验收项）
+
+#### 阶段 2: 转换预览与 Trace（可验证） (1-2 周)
+
+**目标**: 实现“可验证”的转换预览与 trace API（优先于画布映射）
+
+**任务**:
+1. 定义 `transformPreview` / `transformTrace` 输出结构（轻量、可落地）
+2. 实现预览 API：输入示例请求，输出上游请求预览（含 auth 注入结果）
+3. 实现 trace：链选择结果（default vs model override）、步骤摘要、warnings/errors
+4. 添加关键校验与诊断信息（缺字段、工具格式差异、stream 兼容性提示）
+5. API 文档编写
+
+**验收标准**:
+- [ ] API 能输出可用于排障的 trace
+- [ ] 能检测工具格式差异并给出可读提示
+- [ ] 能识别缺失字段/不支持特性并给出告警
+- [ ] API 文档完整
+
+#### 阶段 3: 前端验证与预览 (2-3 周)
+
+**目标**: 前端先交付“验证与预览”；画布为可选增强
+
+**任务**:
+1. 实现 transformer 配置的校验反馈（错误/警告/可用）
+2. 实现预览页面：示例请求输入、上游请求预览、trace 展示
+3. （可选）引入 React Flow 作为高级视图：仅在 trace/映射数据足够稳定时再做画布
+
+**验收标准**:
+- [ ] 用户可在 UI 中验证某 supplier 的 transformer 是否生效
+- [ ] 用户可看到“rules 后请求”“上游请求预览（含 auth 注入）”“trace/warnings”
+- [ ] （可选）高级画布视图可用且不影响核心体验
+
+#### 阶段 4: 前端集成与完善 (1-2 周)
+
+**目标**: 集成到现有界面
+
+**任务**:
+1. 扩展供应商配置表单（添加 transformer 选择）
+2. 创建协议实验室页面
+3. 实现测试数据编辑器
+4. 集成到供应商详情页
+5. 添加导出功能
+6. 响应式适配
+
+**验收标准**:
+- [ ] 可以在供应商管理中配置 transformer
+- [ ] 点击供应商可以进入“转换预览/验证”视图
+- [ ] 支持输入测试数据并预览转换结果
+- [ ] 移动端至少可查看（只读预览/trace），不强行支持画布交互
+
+#### 阶段 5: 测试与优化 (1 周)
+
+**目标**: 全面测试和性能优化
+
+**任务**:
+1. 端到端测试
+2. 性能优化（预览/trace 与流式转换的性能）
+3. 错误处理完善
+4. 文档补充
+5. 用户反馈收集
+
+**验收标准**:
+- [ ] 所有场景测试通过
+- [ ] 预览/trace 响应及时（可观测、可排障）
+- [ ] 错误提示清晰
+- [ ] 用户文档完整
+
+### 6.2 任务清单
+
+```markdown
+## 后端任务
+
+- [ ] 1.1 安装 @musistudio/llms 依赖
+- [ ] 1.2 创建 transformers/ 目录结构
+- [ ] 1.3 定义 PromptXY transformer 配置结构（default/models 精确匹配）
+- [ ] 1.4 实现 TransformerRegistry（链选择 + 校验 + trace）
+- [ ] 1.5 实现 llms-compat（编译 PromptXY 配置到 llms 调用）
+- [ ] 1.6 扩展 Supplier：增加 auth（token/key 存储与注入策略）
+- [ ] 1.7 修改 gateway.ts：rules 后插入协议转换 + auth 注入
+- [ ] 1.8 （可选）实现 SSE 流转换
+- [ ] 1.9 添加转换错误处理与可观测 trace
+- [ ] 1.10 编写单元/集成测试
+
+- [ ] 2.1 实现 transformPreview API（上游请求预览 + auth 注入结果）
+- [ ] 2.2 实现 transformTrace API（链选择 + 步骤摘要 + warnings/errors）
+- [ ] 2.3 添加关键校验与诊断信息（工具差异、缺字段、stream 提示）
+- [ ] 2.4 API 路由注册
+- [ ] 2.5 API 文档编写
+
+## 前端任务
+
+- [ ] 3.1 扩展供应商配置表单：auth + transformer（default/models）
+- [ ] 3.2 创建“协议转换实验室/预览”页面
+- [ ] 3.3 实现测试数据编辑器（示例请求输入）
+- [ ] 3.4 展示上游请求预览（headers/body，敏感字段默认脱敏）
+- [ ] 3.5 展示 trace/warnings/errors
+- [ ] 3.6 编写关键 UI 组件测试（如有现成测试体系）
+
+- [ ] 4.1 集成到供应商详情页
+- [ ] 4.2 实现导出（配置/trace/预览结果）
+- [ ] 4.3 响应式适配（移动端只读预览优先）
+- [ ] 4.4 添加用户引导（解释 default vs model override、token 脱敏等）
+
+## （可选）高级画布视图
+
+- [ ] A.1 安装前端依赖 (@xyflow/react, framer-motion)
+- [ ] A.2 实现 ProtocolCanvas（基于稳定的 trace/映射数据）
+
+## 集成测试
+
+- [ ] 5.1 端到端测试
+- [ ] 5.2 性能测试
+- [ ] 5.3 兼容性测试
+- [ ] 5.4 用户验收测试
+```
+
+---
+
+## 7. 风险评估与缓解
+
+### 7.1 技术风险
+
+| 风险 | 影响 | 概率 | 缓解措施 |
+|------|------|------|----------|
+| `@musistudio/llms` 不满足需求 | 高 | 低 | 提前进行 POC 验证；保留自研选项 |
+| SSE 流转换性能问题 | 中 | 中 | 实现流式管道；使用 TransformStream |
+| 大协议树渲染卡顿（画布视图） | 中 | 中 | 虚拟化节点；懒加载子节点；默认只渲染可见子树 |
+| Transformer 兼容性 | 低 | 中 | 充分测试；提供版本兼容表 |
+
+### 7.2 依赖风险
+
+| 依赖 | 风险 | 缓解措施 |
+|------|------|----------|
+| `@musistudio/llms` | 停止维护 | 抽象接口；可替换实现 |
+| `@xyflow/react` | 重大版本变更 | 版本锁定；关注更新日志 |
+| `framer-motion` | 包体积增加 | 按需导入；考虑轻量替代 |
+
+### 7.3 实施风险
+
+| 风险 | 影响 | 概率 | 缓解措施 |
+|------|------|------|----------|
+| 开发时间超期 | 中 | 中 | 分阶段交付；核心功能优先 |
+| 用户理解成本 | 低 | 高 | 提供详细文档；添加交互引导 |
+| 现有配置兼容性 | 中 | 低 | 新增配置项使用可选字段；提供迁移工具 |
+
+### 7.4 安全与密钥风险（新增）
+
+由于 v1 引入“PromptXY 存储 supplier token/key 并注入上游认证”，需要显式管理以下风险：
+
+| 风险 | 影响 | 概率 | 缓解措施 |
+|------|------|------|----------|
+| token 明文落盘（config/history/log） | 高 | 中 | 配置与 UI 脱敏；历史记录清洗敏感头；日志禁止输出 token；必要时对存储加密 |
+| 预览 API 泄漏敏感信息 | 高 | 中 | 预览输出默认隐藏敏感字段；仅在本地显式“显示明文”操作下可见 |
+| 误注入认证头到错误上游 | 中 | 低 | 绑定 supplier 与 baseUrl；验证 baseUrl；保持 `redirect: manual`（与现网关一致） |
+
+---
+
+## 8. 附录
+
+### 8.1 Anthropic vs OpenAI 协议对比
+
+#### 请求格式
+
+**Anthropic (Messages API)**:
+```json
+{
+  "model": "claude-sonnet-4-20250514",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Hello"
+    }
+  ],
+  "tools": [
+    {
+      "name": "read_file",
+      "description": "Read a file",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "File path"
+          }
+        },
+        "required": ["path"]
+      }
+    }
+  ],
+  "max_tokens": 4096,
+  "stream": true
+}
+```
+
+**OpenAI (Chat Completions API)**:
+```json
+{
+  "model": "gpt-4",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Hello"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "description": "Read a file",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "File path"
+            }
+          },
+          "required": ["path"]
+        }
+      }
+    }
+  ],
+  "max_tokens": 4096,
+  "stream": true
+}
+```
+
+**关键差异**:
+1. `tools` 格式：Anthropic 使用扁平结构，OpenAI 使用嵌套 `type: function`
+2. `input_schema` vs `parameters`：字段名称不同
+3. 响应格式：tool_use 格式差异
+
+#### SSE 响应格式
+
+**Anthropic**:
+```
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"read_file"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\""}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+```
+
+**OpenAI**:
+```
+data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1677652288,"model":"gpt-4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"read_file","arguments":"{\"path\":\""}}]}],"finish_reason":null}]}
+
+data: [DONE]
+```
+
+### 8.2 协议差异总结
+
+| 功能 | Anthropic | OpenAI | Gemini |
+|------|-----------|--------|--------|
+| 消息格式 | messages[] | messages[] | contents[] |
+| 工具定义 | tools[] | tools[] | tools[] |
+| 工具调用 | tool_use block | tool_calls | functionCall |
+| 流式格式 | SSE events | SSE data | SSE streams |
+| 系统提示 | system 字段 | system 消息 | systemInstruction |
+
+### 8.3 参考资料
+
+**文档**:
+- [Anthropic Messages API](https://docs.anthropic.com/en/api/messages)
+- [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat/create)
+- [Gemini API](https://ai.google.dev/gemini-api/docs)
+
+**项目**:
+- [claude-code-router](https://github.com/musistudio/claude-code-router)
+- [@musistudio/llms](https://github.com/musistudio/llms)
+- [React Flow](https://reactflow.dev/)
+
+### 8.4 版本历史
+
+| 版本 | 日期 | 变更 |
+|------|------|------|
+| v1.0 | 2025-01-01 | 初始版本 |
+| v1.1 | 2026-01-01 | 对齐现网关行为；收敛 v1 范围；废弃 protocolType；引入 auth/token 存储与可验证策略；精简大段示意代码 |
+
+### 8.5 参考请求样例（用于实现与回归）
+
+实现协议转换器时，最容易踩坑的不是“字段对照表”，而是**真实客户端在真实场景下发出的请求形态**（尤其是工具调用、流式响应、以及超长上下文）。
+
+PromptXY 当前已会把经过网关的请求记录到本机目录（默认）：`~/.local/promptxy/requests/`。每个文件为 `.yaml`，核心字段包含：
+
+- `client` / `method` / `path`：用于定位入口与协议族
+- `originalBody`：客户端原始请求体（JSON 字符串）
+- `modifiedBody`：经过 rules/adapters 后的请求体（JSON 字符串）
+- `responseHeaders` / `responseBody`：用于分析流式与响应形态（注意脱敏）
+
+> 说明：为避免 token/secret 落盘，v1 记录样例默认不包含入站 `requestHeaders`。因此这些 `.yaml` 不能用于推断 Claude Code 实际发送的鉴权头名；`gatewayAuth.acceptedHeaders` 的默认值应通过运行时观测（仅记录“header 名称/存在性”，不记录值）确认后再收敛。
+
+以下是当前可作为 v1 转换器实现基准的 3 份参考请求（来自你提供的样本）：
+
+1) **Claude / Anthropic Messages（stream + tool_use）**  
+   - 文件：`~/.local/promptxy/requests/2026-01-01_20-28-00-191_7d8s25.yaml`  
+   - `POST /v1/messages`（`client: claude`）  
+   - body 关键形态：`model`、`stream: true`、`messages[]`（含 `content[]` 多段：text / tool_use / tool_result）、`tools[]`
+
+2) **Codex / OpenAI Responses（stream + tools）**  
+   - 文件：`~/.local/promptxy/requests/2026-01-01_21-30-15-167_523jdr.yaml`  
+   - `POST /responses`（`client: codex`）  
+   - body 关键形态：`model`、`stream: true`、`instructions`、`input[]`（message items）、`tools[]`（function tools 定义）、`tool_choice`
+
+3) **Gemini（streamGenerateContent + systemInstruction）**  
+   - 文件：`~/.local/promptxy/requests/2026-01-01_23-17-15-292_h5osz2.yaml`  
+   - `POST /v1beta/models/gemini-3-flash-preview:streamGenerateContent`（`client: gemini`）  
+   - body 关键形态：`systemInstruction`、`contents[]`（role/parts）、`tools[]`（functionDeclarations）、`generationConfig`
+
+使用建议：
+- 将这三类请求作为**单元/集成测试 fixture**的来源（需去除或截断超长文本，且必须脱敏任何 token/secret）。
+- 对每个 transformer 至少覆盖：非流式 + 流式（若纳入 v1）、无工具 + 有工具、短消息 + 长消息三组场景。
+
+---
+
+**文档状态**: 🟡 待 Review
+**下一步**: 等待用户反馈后，可进入提案阶段

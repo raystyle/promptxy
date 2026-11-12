@@ -1,0 +1,241 @@
+/**
+ * ⚠️ STYLESYSTEM COMPLIANCE ⚠️
+ *
+ * 禁止使用硬编码样式值！所有样式必须使用：
+ * 1. Tailwind 语义类名（如 p-md, bg-elevated, text-primary）
+ * 2. CSS 变量（如 var(--spacing-md), var(--color-bg-primary)）
+ * 3. 语义化工具类（如 .card, .btn）
+ *
+ * ❌ FORBIDDEN:
+ * - className="text-blue-700 dark:text-blue-300"
+ * - className="border-blue-200/50 dark:border-blue-800/30"
+ *
+ * ✅ REQUIRED:
+ * - className="text-brand-primary"
+ * - className="border-brand-primary/30 dark:border-brand-primary/20"
+ */
+
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Card, CardBody, Chip } from '@heroui/react';
+import { toast } from 'sonner';
+import { RequestList, RequestDetailSidebar } from '@/components/requests';
+import { SideDrawer } from '@/components/common';
+import { useRequests, useRequestDetail, useDeleteRequest } from '@/hooks';
+import { useUIStore } from '@/store';
+import { RequestFilters } from '@/types';
+
+const VIEWED_STORAGE_KEY = 'promptxy_viewed_requests';
+
+function readViewedIdsArray(): string[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const stored = globalThis.localStorage?.getItem(VIEWED_STORAGE_KEY);
+    const parsed = stored ? JSON.parse(stored) : [];
+    if (!Array.isArray(parsed)) return [];
+    const unique = new Set<string>();
+    for (const v of parsed) {
+      if (typeof v === 'string' && v) unique.add(v);
+    }
+    return [...unique];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 防抖保存 localStorage 的 hook
+ * 避免高频写入导致主线程阻塞
+ */
+function useDebouncedLocalStorage(key: string, value: string[], delay: number = 500) {
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    // 清除之前的定时器
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+    }
+
+    // 设置新的定时器
+    timeoutRef.current = setTimeout(() => {
+      try {
+        globalThis.localStorage?.setItem(key, JSON.stringify(value));
+      } catch {
+        // 忽略存储错误
+      }
+    }, delay);
+
+    // 清理函数
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
+    };
+  }, [key, value, delay]);
+}
+
+const RequestsPageComponent: React.FC = () => {
+  const [page, setPage] = useState(1);
+  const [filters, setFilters] = useState<RequestFilters>({});
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // 已查看：React state 为唯一真相，localStorage 仅做持久化镜像
+  const [viewedIdsArray, setViewedIdsArray] = useState<string[]>(() => readViewedIdsArray());
+  const viewedIds = useMemo(() => new Set(viewedIdsArray), [viewedIdsArray]);
+
+  // 侧边栏状态 - 由 SideDrawer 内部管理
+  const [sidebarWidth, setSidebarWidth] = useState(60);
+  const [isOverlayMode, setIsOverlayMode] = useState(false);
+
+  const { data, isLoading, refetch } = useRequests(filters, page);
+  const { request, isLoading: detailLoading } = useRequestDetail(selectedId);
+  const deleteMutation = useDeleteRequest();
+
+  // 侧边栏状态管理
+  const { isRequestSidebarOpen, openRequestSidebar, closeRequestSidebar } = useUIStore();
+
+  // 使用防抖保存 localStorage，避免高频写入阻塞主线程
+  useDebouncedLocalStorage(VIEWED_STORAGE_KEY, viewedIdsArray, 500);
+
+  const handleRowClick = useCallback(
+    (id: string) => {
+      setSelectedId(id);
+      setViewedIdsArray(prev => (prev.includes(id) ? prev : [...prev, id]));
+      openRequestSidebar(id);
+    },
+    [openRequestSidebar],
+  );
+
+  const handleClose = useCallback(() => {
+    closeRequestSidebar();
+    // 不清除 selectedId，保持选中状态
+  }, [closeRequestSidebar]);
+
+  const handleViewedToggle = useCallback((id: string) => {
+    setViewedIdsArray(prev => (prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]));
+  }, []);
+
+  const handleDelete = async (id: string) => {
+    // 使用 toast.promise 处理异步操作
+    toast.promise(deleteMutation.mutateAsync(id), {
+      loading: '正在删除请求...',
+      success: () => {
+        setViewedIdsArray(prev => prev.filter(x => x !== id));
+        refetch();
+        return `请求 ${id} 已删除`;
+      },
+      error: (err: any) => `删除失败: ${err?.message}`,
+    });
+  };
+
+  const handleRefresh = () => {
+    refetch();
+    toast.success('已刷新请求列表');
+  };
+
+  return (
+    <div className="flex h-[calc(100vh-56px)]">
+      {/* 左侧内容区域 - 支持平滑过渡动画 */}
+      <div
+        className="overflow-auto transition-all duration-300 ease-out"
+        style={{
+          width: isRequestSidebarOpen
+            ? isOverlayMode
+              ? '40vw'
+              : `${100 - sidebarWidth}vw`
+            : '100%',
+        }}
+      >
+        <div className="p-6 space-y-6 max-w-7xl mx-auto">
+          {/* 顶部标题栏 */}
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-2xl font-bold bg-gradient-to-r from-brand-primary to-accent bg-clip-text text-transparent">
+                请求监控
+              </h1>
+              <p className="text-sm text-secondary mt-1">实时查看经过代理的请求历史和修改详情</p>
+            </div>
+            <div className="flex gap-2">
+              <Chip color="secondary" variant="flat" size="sm">
+                {data?.total || 0} 条记录
+              </Chip>
+            </div>
+          </div>
+
+          {/* 统计卡片 */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <Card className="border border-brand-primary/30 dark:border-brand-primary/20 bg-gradient-to-br from-elevated to-brand-primary/10 dark:from-elevated dark:to-brand-primary/5">
+              <CardBody className="p-p4">
+                <div className="text-sm text-brand-primary dark:text-brand-primary/80 font-medium">
+                  总请求
+                </div>
+                <div className="text-2xl font-bold text-brand-primary dark:text-brand-primary/90">
+                  {data?.total || 0}
+                </div>
+              </CardBody>
+            </Card>
+            <Card className="border border-brand-primary/30 dark:border-brand-primary/20 bg-gradient-to-br from-elevated to-brand-primary/10 dark:from-elevated dark:to-brand-primary/5">
+              <CardBody className="p-p4">
+                <div className="text-sm text-status-success dark:text-status-success/80 font-medium">
+                  当前页
+                </div>
+                <div className="text-2xl font-bold text-status-success dark:text-status-success/90">
+                  {data?.items?.length || 0}
+                </div>
+              </CardBody>
+            </Card>
+            <Card className="border border-brand-primary/30 dark:border-brand-primary/20 bg-gradient-to-br from-elevated to-brand-primary/10 dark:from-elevated dark:to-brand-primary/5">
+              <CardBody className="p-p4">
+                <div className="text-sm text-accent dark:text-accent/80 font-medium">当前页码</div>
+                <div className="text-2xl font-bold text-accent dark:text-accent/90">{page}</div>
+              </CardBody>
+            </Card>
+            <Card className="border border-brand-primary/30 dark:border-brand-primary/20 bg-gradient-to-br from-elevated to-brand-primary/10 dark:from-elevated dark:to-brand-primary/5">
+              <CardBody className="p-p4">
+                <div className="text-sm text-status-warning dark:text-status-warning/80 font-medium">
+                  总页数
+                </div>
+                <div className="text-2xl font-bold text-status-warning dark:text-status-warning/90">
+                  {Math.ceil((data?.total || 0) / 50)}
+                </div>
+              </CardBody>
+            </Card>
+          </div>
+
+          {/* 请求列表组件 */}
+          <RequestList
+            requests={data?.items || []}
+            filters={filters}
+            onFiltersChange={setFilters}
+            isLoading={isLoading}
+            total={data?.total || 0}
+            page={page}
+            onPageChange={setPage}
+            onRowClick={handleRowClick}
+            onRefresh={handleRefresh}
+            onDelete={handleDelete}
+            selectedId={selectedId}
+            viewedIds={viewedIds}
+            onViewedToggle={handleViewedToggle}
+          />
+        </div>
+      </div>
+
+      {/* 侧边栏 - 双层结构，flex 子元素 */}
+      <SideDrawer
+        isOpen={isRequestSidebarOpen}
+        onClose={handleClose}
+        defaultWidth={60}
+        onModeChange={mode => setIsOverlayMode(mode === 'overlay')}
+        onWidthChange={setSidebarWidth}
+      >
+        <RequestDetailSidebar request={request || null} isLoading={detailLoading} />
+      </SideDrawer>
+    </div>
+  );
+};
+
+/**
+ * 使用 React.memo 包裹 RequestsPage 组件
+ * 避免父组件状态变化时不必要的重渲染
+ */
+export const RequestsPage = React.memo(RequestsPageComponent);

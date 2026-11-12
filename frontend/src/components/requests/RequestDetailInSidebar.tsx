@@ -1,0 +1,478 @@
+/**
+ * ⚠️ STYLESYSTEM COMPLIANCE ⚠️
+ *
+ * 禁止使用硬编码样式值！所有样式必须使用：
+ * 1. Tailwind 语义类名（如 p-md, bg-elevated, text-primary）
+ * 2. CSS 变量（如 var(--spacing-md), var(--color-bg-primary)）
+ * 3. 语义化工具类（如 .card, .btn）
+ *
+ * ❌ FORBIDDEN:
+ * - 硬编码颜色值（如 #007aff, #f5f5f7）
+ * - 硬编码尺寸值（如 400px, 16px）
+ * - 旧 Tailwind 颜色类（如 gray-*, blue-*, slate-*）
+ *
+ * ✅ REQUIRED:
+ * - 使用语义化变量和类名
+ * - 参考 styles/tokens/colors.css 中的可用变量
+ */
+
+import React, { useState } from 'react';
+import { Card, CardBody, CardHeader, Chip, Spinner, Divider, Tabs, Tab, Button, Modal, ModalContent, ModalHeader, ModalBody } from '@heroui/react';
+import { RequestRecord } from '@/types';
+import { useUIStore } from '@/store';
+import {
+  formatTimeWithMs,
+  formatDuration,
+  getStatusColor,
+  formatClient,
+  formatSize,
+  formatHeadersAsJSON,
+} from '@/utils';
+import { RequestDetailPanel } from '@/components/request-viewer';
+import { formatUsdCostCompact } from '@/utils/format';
+import { MatchMode, type RegexResult } from '@/utils/regexGenerator';
+import { Server, ArrowRight, Eye, CheckCircle2, ChevronDown, Copy } from 'lucide-react';
+
+interface RequestDetailInSidebarProps {
+  request: RequestRecord | null;
+  isLoading: boolean;
+  /** 基于选中内容创建规则的回调 */
+  onSelectionBasedCreate?: (
+    selectedText: string,
+    mode: MatchMode,
+    ignoreCase: boolean,
+    multiline: boolean,
+    result: RegexResult,
+  ) => void;
+  /** 基于当前请求创建规则的回调 */
+  onBasedOnRequestCreate?: () => void;
+}
+
+/**
+ * 请求头折叠面板组件
+ */
+const RequestHeadersAccordion: React.FC<{
+  headers: Record<string, string> | undefined;
+}> = ({ headers }) => {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [isCopied, setIsCopied] = useState(false);
+
+  if (!headers || Object.keys(headers).length === 0) {
+    return null;
+  }
+
+  const headerCount = Object.keys(headers).length;
+  const formattedJSON = formatHeadersAsJSON(headers);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(formattedJSON);
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 1500);
+    } catch (err) {
+      console.error('复制失败:', err);
+    }
+  };
+
+  return (
+    <Card className="rounded-lg overflow-hidden border border-brand-primary/30 dark:border-brand-primary/20 bg-gradient-to-br from-elevated to-brand-primary/5 dark:from-elevated dark:to-brand-primary/10">
+      <CardBody className="px-3 py-2">
+        <div
+          onClick={() => setIsExpanded(!isExpanded)}
+          className="flex items-center justify-between cursor-pointer"
+        >
+          <div className="flex items-center gap-2 text-xs">
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              className="text-brand-primary"
+            >
+              <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
+            </svg>
+            <span className="font-medium text-primary">请求头</span>
+            <span className="text-secondary bg-primary/50 px-2 py-0.5 rounded-full border border-subtle">
+              {headerCount} 项
+            </span>
+          </div>
+          <ChevronDown
+            size={14}
+            className={`text-secondary transition-transform duration-300 ${
+              isExpanded ? 'rotate-180' : ''
+            }`}
+          />
+        </div>
+
+        {isExpanded && (
+          <div className="relative mt-2">
+            <button
+              onClick={handleCopy}
+              className={`absolute top-1 right-1 w-6 h-6 rounded border border-default bg-primary text-secondary hover:bg-secondary hover:text-primary transition-all flex items-center justify-center ${
+                isCopied
+                  ? 'bg-status-warning-bg text-status-warning border-status-warning'
+                  : ''
+              }`}
+              title="复制 JSON"
+            >
+              <Copy size={12} />
+            </button>
+            <pre className="font-mono text-xs bg-secondary p-2 overflow-x-auto text-primary whitespace-pre">
+              {formattedJSON}
+            </pre>
+          </div>
+        )}
+      </CardBody>
+    </Card>
+  );
+};
+
+export const RequestDetailInSidebar: React.FC<RequestDetailInSidebarProps> = ({
+  request,
+  isLoading,
+  onSelectionBasedCreate,
+  onBasedOnRequestCreate,
+}) => {
+  const { setActiveTab } = useUIStore();
+  const [isTransformDetailOpen, setIsTransformDetailOpen] = useState(false);
+
+  if (isLoading) {
+    return (
+      <div className="flex justify-center items-center py-12">
+        <Spinner color="primary" size="sm">
+          加载详情中...
+        </Spinner>
+      </div>
+    );
+  }
+
+  if (!request) {
+    return (
+      <div className="p-8 text-center space-y-4">
+        <div className="text-sm font-medium text-secondary">未找到请求详情</div>
+      </div>
+    );
+  }
+
+  // 解析转换链
+  const transformerChain = request.transformerChain || [];
+  const hasRouteInfo = request.supplierId || request.supplierName || transformerChain.length > 0;
+
+  let parsedPricingSnapshot: any = undefined;
+  let priceSource = '-';
+  if (request.pricingSnapshot) {
+    try {
+      parsedPricingSnapshot = JSON.parse(request.pricingSnapshot);
+      if (typeof parsedPricingSnapshot?.priceSource === 'string' && parsedPricingSnapshot.priceSource) {
+        priceSource = parsedPricingSnapshot.priceSource;
+      }
+    } catch {
+      // ignore pricing snapshot parsing errors
+    }
+  }
+
+  const pricingStatusText = request.pricingStatus || '历史记录无计费快照';
+  const totalCostText =
+    request.pricingStatus === 'calculated' && typeof request.totalCost === 'number'
+      ? formatUsdCostCompact(request.totalCost)
+      : '--';
+
+  return (
+    <div className="space-y-3">
+      {/* 基本信息 - 极简单行布局 */}
+      <Card className="rounded-lg overflow-hidden border border-brand-primary/30 dark:border-brand-primary/20 bg-gradient-to-br from-elevated to-brand-primary/5 dark:from-elevated dark:to-brand-primary/10">
+        <CardBody className="px-3 py-2">
+          <div className="flex items-center gap-2 text-xs flex-wrap">
+            {/* ID - 完整显示 */}
+            <span className="text-tertiary font-mono text-xs" title={request.id}>
+              {request.id}
+            </span>
+            <span className="text-tertiary">·</span>
+            {/* 时间 */}
+            <span className="text-tertiary whitespace-nowrap">
+              {formatTimeWithMs(request.timestamp)}
+            </span>
+            <span className="text-tertiary">·</span>
+            {/* 客户端 */}
+            <span className="text-secondary font-medium">{formatClient(request.client)}</span>
+            <span className="text-tertiary">·</span>
+            {/* 方法 */}
+            <span className="text-tertiary uppercase font-medium">{request.method}</span>
+            <span className="text-tertiary">·</span>
+            {/* 状态 */}
+            <Chip
+              size="sm"
+              color={getStatusColor(request.responseStatus)}
+              variant="flat"
+              className="h-5 min-h-5 min-w-0"
+              classNames={{
+                base: 'min-w-0 inline-flex items-center',
+                content: 'px-2 py-0.5 min-w-0 inline-flex',
+              }}
+            >
+              {request.responseStatus || 'N/A'}
+            </Chip>
+            <span className="text-tertiary">·</span>
+            {/* 耗时 */}
+            {request.durationMs && (
+              <>
+                <span className="text-tertiary">{formatDuration(request.durationMs)}</span>
+                <span className="text-tertiary">·</span>
+              </>
+            )}
+            {/* 请求体大小 */}
+            {request.requestSize && (
+              <>
+                <span className="text-tertiary">{formatSize(request.requestSize)}</span>
+                <span className="text-tertiary">·</span>
+              </>
+            )}
+            {/* 路径 */}
+            <span className="font-mono text-secondary truncate flex-1 min-w-0">{request.path}</span>
+          </div>
+        </CardBody>
+      </Card>
+
+      {/* 路由信息 - 新增 */}
+      {hasRouteInfo && (
+        <Card className="rounded-lg overflow-hidden border border-brand-primary/30 dark:border-brand-primary/20 bg-gradient-to-br from-elevated to-brand-primary/5 dark:from-elevated dark:to-brand-primary/10">
+          <CardBody className="px-3 py-2 space-y-2">
+            {/* 供应商信息 */}
+            {request.supplierName && (
+              <div className="flex items-center gap-2 text-xs">
+                <Server size={14} className="text-brand-primary" />
+                <span className="text-tertiary">供应商:</span>
+                <span className="text-secondary font-medium">{request.supplierName}</span>
+              </div>
+            )}
+
+            {/* 转换链信息 */}
+	            {transformerChain.length > 0 && (
+	              <div className="flex items-center gap-2 text-xs">
+	                <span className="text-tertiary">转换链:</span>
+	                <div className="flex items-center gap-1 flex-wrap">
+	                  {transformerChain.map((step, index) => (
+	                    <React.Fragment key={index}>
+	                      <Chip size="sm" variant="flat" color="primary" className="h-5 min-h-5">
+	                        {step}
+	                      </Chip>
+	                      {index < transformerChain.length - 1 && (
+	                        <ArrowRight size={12} className="text-tertiary" />
+	                      )}
+	                    </React.Fragment>
+	                  ))}
+	                </div>
+	                <Button
+	                  size="sm"
+	                  variant="light"
+	                  color="primary"
+	                  onPress={() => setIsTransformDetailOpen(true)}
+	                  startContent={<Eye size={14} />}
+	                  className="h-5 min-h-5 px-2 min-w-0 text-xs"
+	                >
+	                  详情
+	                </Button>
+	              </div>
+	            )}
+
+	            {/* 模型与计费口径 */}
+	            {(request.model || request.requestedModel || request.upstreamModel || request.cachedInputTokens) && (
+	              <div className="flex items-center gap-2 text-xs flex-wrap">
+	                <span className="text-tertiary">模型:</span>
+	                {request.model && (
+	                  <Chip size="sm" variant="flat" color="secondary" className="h-5 min-h-5">
+	                    计费 {request.model}
+	                  </Chip>
+	                )}
+	                {request.requestedModel && (
+	                  <Chip size="sm" variant="flat" className="h-5 min-h-5">
+	                    请求 {request.requestedModel}
+	                  </Chip>
+	                )}
+	                {request.upstreamModel && (
+	                  <Chip size="sm" variant="flat" className="h-5 min-h-5">
+	                    上游 {request.upstreamModel}
+	                  </Chip>
+	                )}
+	                {typeof request.cachedInputTokens === 'number' && request.cachedInputTokens > 0 && (
+	                  <Chip size="sm" variant="flat" color="warning" className="h-5 min-h-5">
+	                    缓存 {request.cachedInputTokens}
+	                  </Chip>
+	                )}
+	              </div>
+	            )}
+
+	            {/* 跳转到配置 */}
+	            {request.supplierId && (
+	              <Button
+	                size="sm"
+	                variant="flat"
+                color="primary"
+                onPress={() => setActiveTab('route-config')}
+                className="text-xs h-6"
+              >
+                跳转到配置
+              </Button>
+            )}
+          </CardBody>
+        </Card>
+      )}
+
+      {/* 计费详情（Table） */}
+      <Card className="rounded-lg overflow-hidden border border-brand-primary/30 dark:border-brand-primary/20 bg-gradient-to-br from-elevated to-brand-primary/5 dark:from-elevated dark:to-brand-primary/10">
+        <CardHeader className="px-3 py-2 text-xs font-semibold text-primary">计费详情</CardHeader>
+        <Divider className="bg-subtle" />
+        <CardBody className="p-0">
+          <table className="w-full text-xs">
+            <tbody>
+              <tr className="border-b border-subtle">
+                <td className="px-3 py-2 text-tertiary w-32">计费模型</td>
+                <td className="px-3 py-2 font-mono text-primary">{request.model || '-'}</td>
+              </tr>
+              <tr className="border-b border-subtle">
+                <td className="px-3 py-2 text-tertiary">输入/输出 Token</td>
+                <td className="px-3 py-2 font-mono text-primary">
+                  {(typeof request.inputTokens === 'number' ? request.inputTokens : '-') +
+                    ' / ' +
+                    (typeof request.outputTokens === 'number' ? request.outputTokens : '-')}
+                </td>
+              </tr>
+              <tr className="border-b border-subtle">
+                <td className="px-3 py-2 text-tertiary">缓存 Token</td>
+                <td className="px-3 py-2 font-mono text-primary">
+                  {typeof request.cachedInputTokens === 'number' ? request.cachedInputTokens : '-'}
+                </td>
+              </tr>
+              <tr className="border-b border-subtle">
+                <td className="px-3 py-2 text-tertiary">总费用</td>
+                <td className="px-3 py-2 font-mono text-primary">{totalCostText}</td>
+              </tr>
+              <tr className="border-b border-subtle">
+                <td className="px-3 py-2 text-tertiary">计费状态</td>
+                <td className="px-3 py-2 text-primary">{pricingStatusText}</td>
+              </tr>
+              <tr>
+                <td className="px-3 py-2 text-tertiary">来源信息</td>
+                <td className="px-3 py-2 text-primary">
+                  {`usage:${request.usageSource || '-'}, price:${priceSource}`}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </CardBody>
+      </Card>
+
+      {/* 转换详情弹窗 */}
+      <Modal
+        isOpen={isTransformDetailOpen}
+        onClose={() => setIsTransformDetailOpen(false)}
+        size="2xl"
+        backdrop="blur"
+        placement="center"
+        classNames={{
+          base: 'border border-brand-primary/30 dark:border-brand-primary/20 bg-canvas dark:bg-secondary',
+          backdrop: 'bg-overlay',
+          header: 'bg-canvas dark:bg-secondary border-b border-subtle rounded-t-large',
+          body: 'bg-canvas dark:bg-secondary',
+          footer: 'bg-canvas dark:bg-secondary border-t border-subtle rounded-b-large',
+        }}
+      >
+        <ModalContent>
+          <ModalHeader>转换详情</ModalHeader>
+          <ModalBody className="space-y-4">
+            {request.supplierName && (
+              <div className="p-3 rounded-lg bg-canvas dark:bg-secondary/50 space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-secondary">供应商:</span>
+                  <span className="text-sm font-medium text-primary">
+                    {request.supplierName}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {transformerChain.length > 0 && (
+              <>
+                <div className="p-3 rounded-lg bg-canvas dark:bg-secondary/50 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-secondary">转换链:</span>
+                  </div>
+                  <div className="space-y-2">
+                    {transformerChain.map((step, index) => (
+                      <div key={index} className="p-3 rounded-lg bg-canvas dark:bg-secondary/50">
+                        <div className="flex items-center justify-between mb-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-secondary">
+                              步骤 {index + 1}
+                            </span>
+                            <Chip size="sm" color="primary" variant="flat">
+                              {step}
+                            </Chip>
+                          </div>
+                          <CheckCircle2 size={16} className="text-status-success" />
+                        </div>
+                        <p className="text-xs text-secondary">
+                          使用 {step} 转换器
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </ModalBody>
+        </ModalContent>
+      </Modal>
+
+      {/* 匹配规则 - 紧凑单行 */}
+      {request.matchedRules && request.matchedRules.length > 0 && (
+        <Card className="rounded-lg overflow-hidden border border-brand-primary/30 dark:border-brand-primary/20 bg-gradient-to-br from-elevated to-brand-primary/5 dark:from-elevated dark:to-brand-primary/10">
+          <CardBody className="px-3 py-2">
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-tertiary font-medium">匹配:</span>
+              <div className="flex flex-wrap gap-1.5 flex-1">
+                {request.matchedRules.map((match, i) => (
+                  <React.Fragment key={i}>
+                    <span className="text-xs text-secondary font-mono">{match.ruleId}</span>
+                    <Chip
+                      size="sm"
+                      color="warning"
+                      variant="flat"
+                      className="h-5 min-h-5 text-xs uppercase px-2 min-w-0"
+                      classNames={{
+                        base: 'min-w-0 inline-flex items-center',
+                        content: 'px-2 py-0.5 min-w-0 inline-flex',
+                      }}
+                    >
+                      {match.opType}
+                    </Chip>
+                  </React.Fragment>
+                ))}
+              </div>
+            </div>
+          </CardBody>
+        </Card>
+      )}
+
+      {/* 请求头折叠面板 */}
+      <RequestHeadersAccordion headers={request.requestHeaders} />
+
+      {/* 请求详情 */}
+      <div
+        className="border border-subtle rounded-lg overflow-hidden"
+        style={{ height: 'calc(100vh - 260px)' }}
+      >
+        <RequestDetailPanel
+          request={request.modifiedBody}
+          originalRequest={request.transformedBody || request.originalBody}
+          responseStatus={request.responseStatus}
+          responseDuration={request.durationMs}
+          onSelectionBasedCreate={onSelectionBasedCreate}
+          onBasedOnRequestCreate={onBasedOnRequestCreate}
+        />
+      </div>
+    </div>
+  );
+};

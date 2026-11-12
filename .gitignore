@@ -1,0 +1,21 @@
+node_modules/
+dist/
+.DS_Store
+
+# Reference repos (not part of promptxy)
+refence/
+
+# Local tool folders
+.claude/
+.gemini/
+
+# Worktrees
+.worktrees/
+
+# Tmux-worktree task management
+.tmux-worktree/
+
+# Local config
+promptxy.config.json
+
+package-lock.json

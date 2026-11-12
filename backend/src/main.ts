@@ -1,0 +1,102 @@
+import { loadConfig, getConfigDir } from './promptxy/config.js';
+import { createGateway } from './promptxy/gateway.js';
+import { initializeDatabase } from './promptxy/database.js';
+import { createLogger } from './promptxy/logger.js';
+import { getSyncService } from './promptxy/sync/sync-service.js';
+import { mkdir } from 'node:fs/promises';
+import { parseCliArgs, printHelp, printVersion } from './promptxy/cli.js';
+
+async function main() {
+  const cliOptions = parseCliArgs();
+
+  if (cliOptions.help) {
+    printHelp();
+    process.exit(0);
+  }
+
+  if (cliOptions.version) {
+    printVersion();
+    process.exit(0);
+  }
+
+  const config = await loadConfig(cliOptions);
+  const logger = createLogger({ debug: config.debug });
+
+  // 确保配置目录存在
+  const configDir = getConfigDir();
+  await mkdir(configDir, { recursive: true });
+
+  // 初始化数据库
+  logger.info(`[PromptXY] 初始化数据库...`);
+  const db = await initializeDatabase(config.debug);
+
+  // 创建统一服务器（Gateway + API）
+  const server = createGateway(config, db, config.rules);
+
+  // 初始化同步服务
+  if (config.sync) {
+    const syncService = getSyncService();
+    await syncService.init(config.sync);
+    logger.info(`[PromptXY] 同步服务已初始化${config.sync.enabled ? ' (自动同步已启用)' : ''}`);
+  }
+
+  // 启动服务器
+  server.listen(config.listen.port, config.listen.host, () => {
+    logger.info(`[PromptXY] 服务启动: http://${config.listen.host}:${config.listen.port}`);
+    logger.info(`[PromptXY] API路由: /_promptxy/*`);
+    logger.info(`[PromptXY] 代理路由: /claude/*, /codex/*, /chat/*, /gemini/*`);
+  });
+
+  // 优雅关闭处理
+  const shutdown = async () => {
+    logger.info(`[PromptXY] 正在关闭服务器...`);
+
+    // 停止同步服务定时任务
+    try {
+      const syncService = getSyncService();
+      syncService.stopScheduler();
+    } catch {
+      // 忽略同步服务未初始化的情况
+    }
+
+    // 关闭所有 SSE 连接
+    const { getSSEConnections } = await import('./promptxy/api-handlers.js');
+    const sseConnections = getSSEConnections();
+
+    if (sseConnections.size > 0) {
+      logger.info(`[PromptXY] 正在关闭 ${sseConnections.size} 个 SSE 连接...`);
+      for (const res of sseConnections) {
+        try {
+          res.end();
+        } catch {
+          // 忽略已关闭的连接错误
+        }
+      }
+      sseConnections.clear();
+    }
+
+    // 设置关闭超时（5秒）
+    const timeout = setTimeout(() => {
+      console.warn(`[PromptXY] 关闭超时，强制退出`);
+      process.exit(1);
+    }, 5000);
+
+    // 关闭服务器
+    server.close(() => {
+      clearTimeout(timeout);
+      logger.info(`[PromptXY] 服务器已关闭`);
+      process.exit(0);
+    });
+  };
+
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
+  // 输出配置信息
+  logger.info(`[PromptXY] 配置目录: ${configDir}`);
+  logger.info(`[PromptXY] 存储限制: 最近 ${config.storage.maxHistory} 条请求`);
+  logger.info(`[PromptXY] 规则数量: ${config.rules.length}`);
+  logger.info(`[PromptXY] 调试模式: ${config.debug ? '开启' : '关闭'}`);
+}
+
+void main();

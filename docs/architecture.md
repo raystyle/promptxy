@@ -1,0 +1,675 @@
+# PromptXY 完整架构设计
+
+> **版本**: v2.1
+> **创建日期**: 2025-12-20
+> **更新日期**: 2025-12-31
+> **状态**: ✅ 已实现
+
+---
+
+## 🏗️ 项目结构
+
+```
+promptxy/
+├── src/                          # npm 包源代码（简化版）
+│   ├── main.ts                   # 包入口，创建统一服务器
+│   └── promptxy/
+│       ├── gateway.ts            # 统一网关核心
+│       ├── config.ts             # 配置管理
+│       ├── types.ts              # 类型定义
+│       ├── cli.ts                # 命令行解析
+│       ├── http.ts               # HTTP 工具函数
+│       ├── logger.ts             # 日志工具
+│       ├── rules/                # 规则引擎
+│       │   └── engine.ts         # 规则执行引擎
+│       └── adapters/             # AI 服务适配器
+│           ├── claude.ts         # Claude 适配器
+│           ├── codex.ts          # Codex 适配器
+│           └── gemini.ts         # Gemini 适配器
+│
+├── backend/                      # 完整版（带 Web UI）
+│   └── src/
+│       ├── main.ts               # 完整服务的入口
+│       └── promptxy/
+│           ├── gateway.ts        # 统一网关核心
+│           ├── config.ts         # 配置管理
+│           ├── database.ts       # SQLite 数据库
+│           ├── types.ts          # 类型定义
+│           ├── api-handlers.ts   # API 处理器
+│           ├── cli.ts            # 命令行解析
+│           ├── http.ts           # HTTP 工具函数
+│           ├── logger.ts         # 日志工具
+│           ├── port-utils.ts     # 端口工具
+│           ├── rules/            # 规则引擎
+│           │   └── engine.ts     # 规则执行引擎
+│           └── adapters/         # AI 服务适配器
+│               ├── claude.ts     # Claude 适配器
+│               ├── codex.ts      # Codex 适配器
+│               └── gemini.ts     # Gemini 适配器
+│
+├── frontend/                     # 前端应用 (React + HeroUI)
+│   ├── src/
+│   │   ├── main.tsx              # 应用入口
+│   │   ├── App.tsx               # 主组件
+│   │   ├── components/           # UI 组件
+│   │   │   ├── layout/           # 布局组件
+│   │   │   ├── rules/            # 规则相关
+│   │   │   ├── requests/         # 请求相关
+│   │   │   ├── preview/          # 预览相关
+│   │   │   └── common/           # 通用组件
+│   │   ├── pages/                # 页面
+│   │   ├── hooks/                # React Hooks
+│   │   ├── api/                  # API 客户端
+│   │   ├── store/                # 状态管理
+│   │   ├── types/                # 类型定义
+│   │   ├── utils/                # 工具函数
+│   │   └── styles/               # 样式
+│   └── package.json
+│
+├── scripts/                      # 构建和开发脚本
+│   ├── dev.sh                    # 开发环境启动
+│   ├── build.sh                  # 构建
+│   └── start.sh                  # 启动
+│
+├── docs/                         # 文档
+│   ├── architecture.md           # 此文件
+│   ├── configuration.md          # 配置参考
+│   ├── origin_and_requirements.md # 项目背景
+│   └── usage.md                  # 使用指南
+│
+├── openspec/                     # OpenSpec 规范
+│   ├── specs/                    # 已实现功能规范
+│   └── changes/                  # 变更提案
+│
+├── package.json                  # 主包配置
+├── tsconfig.json                 # TypeScript 配置
+└── README.md
+```
+
+---
+
+## 🎯 核心设计原则
+
+### 1. 统一架构
+
+- **开发时**：前后端独立开发，独立启动（便于调试）
+- **生产时**：统一端口部署（默认 7070）
+- **通信**：HTTP API + SSE 实时推送
+
+### 2. 数据流设计
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                         用户操作                             │
+└──────────────────────┬──────────────────────────────────────┘
+                       │
+                       ↓
+┌─────────────────────────────────────────────────────────────┐
+│                    前端 (React + HeroUI)                     │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
+│  │  规则管理    │  │  请求查看    │  │  预览测试    │     │
+│  │  (UI层)      │  │  (UI层)      │  │  (UI层)      │     │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘     │
+│         │                 │                 │              │
+│         └────────┬────────┴────────┬────────┘              │
+│                  │                 │                       │
+│         ┌────────▼────────┐  ┌─────▼──────┐               │
+│         │  API客户端      │  │  SSE客户端 │               │
+│         │  (fetch/axios)  │  │  (EventSource)│             │
+│         └────────┬────────┘  └─────┬──────┘               │
+└──────────────────┼──────────────────┼──────────────────────┘
+                   │                  │
+                   ↓                  ↓
+┌─────────────────────────────────────────────────────────────┐
+│              PromptXY 统一服务器 (端口 7070)                  │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
+│  │  │  API路由     │  │  SSE推送     │  │  代理核心    │  │
+│  │  │  /_promptxy/*│  │  /_promptxy  │  │  /claude/*   │  │
+│  │  │              │  │              │  │  /codex/*    │  │
+│  │  │              │  │              │  │  /gemini/*   │  │
+│  │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  │
+│  └─────────┼──────────────────┼──────────────────┼─────────┘
+│            │                  │                  │
+│            └────────┬─────────┴────────┬─────────┘
+│                     │                  │
+│            ┌────────▼────────┐  ┌─────▼──────┐               │
+│            │  SQLite数据库   │  │  配置文件  │               │
+│            │  (请求历史)     │  │  (规则)    │               │
+│            └─────────────────┘  └────────────┘               │
+└─────────────────────────────────────────────────────────────┘
+                   │
+                   ↓
+┌─────────────────────────────────────────────────────────────┐
+│                    CLI工具 (Claude/Codex/Gemini)             │
+│  发起请求 → 经过代理 → 规则修改 → 转发上游API                 │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 📡 API 通信协议
+
+### 统一服务器端点（端口 7070）
+
+所有 API 都在同一端口上，使用 `/_promptxy/` 前缀：
+
+#### 1. 健康检查
+
+```
+GET /_promptxy/health
+```
+
+#### 2. 配置管理
+
+```
+GET    /_promptxy/config             # 获取配置
+POST   /_promptxy/config/sync        # 同步配置（立即生效）
+```
+
+#### 3. 规则测试
+
+```
+POST /_promptxy/preview              # 预览规则效果
+```
+
+#### 4. 请求历史
+
+```
+GET    /_promptxy/requests           # 获取请求列表（分页、筛选）
+GET    /_promptxy/requests/:id       # 获取请求详情
+POST   /_promptxy/requests/cleanup   # 清理旧数据
+DELETE /_promptxy/requests/:id       # 删除单个请求
+```
+
+#### 5. 实时推送
+
+```
+GET /_promptxy/events                # SSE 连接（新请求推送）
+```
+
+#### 6. 供应商管理
+
+```
+GET    /_promptxy/suppliers          # 获取供应商列表
+POST   /_promptxy/suppliers          # 创建供应商
+PUT    /_promptxy/suppliers/:id      # 更新供应商
+DELETE /_promptxy/suppliers/:id      # 删除供应商
+POST   /_promptxy/suppliers/:id/toggle  # 切换供应商状态
+```
+
+#### 7. 其他
+
+```
+GET    /_promptxy/paths              # 获取唯一路径列表
+GET    /_promptxy/settings           # 获取设置
+POST   /_promptxy/settings           # 更新设置
+GET    /_promptxy/stats              # 统计信息
+GET    /_promptxy/database           # 数据库信息
+```
+
+### SSE事件类型
+
+```typescript
+// 新请求事件
+event: request
+data: {
+  "id": "req-20251220-143215-abc",
+  "timestamp": 1734705135000,
+  "client": "codex",
+  "path": "/v1/chat/completions",
+  "method": "POST"
+}
+
+// 配置更新事件（可选）
+event: config_updated
+data: {
+  "timestamp": 1734705135000,
+  "ruleCount": 42
+}
+```
+
+---
+## 📊 数据模型
+
+### 1. 规则 (Rule)
+
+```typescript
+interface Rule {
+  uuid: string; // 规则唯一标识符（自动生成）
+  name: string; // 规则名称
+  description?: string; // 描述
+
+  when: {
+    client: 'claude' | 'codex' | 'gemini';
+    field: 'system' | 'instructions';
+    method?: string;
+    pathRegex?: string;
+    modelRegex?: string;
+  };
+
+  ops: Array<
+    | { type: 'set'; text: string }
+    | { type: 'append'; text: string }
+    | { type: 'prepend'; text: string }
+    | { type: 'replace'; match?: string; regex?: string; flags?: string; replacement: string }
+    | { type: 'delete'; match?: string; regex?: string; flags?: string }
+    | { type: 'insert_before'; regex: string; flags?: string; text: string }
+    | { type: 'insert_after'; regex: string; flags?: string; text: string }
+  >;
+
+  stop?: boolean; // 是否在此后停止
+  enabled?: boolean; // 是否启用
+  createdAt?: number; // 创建时间
+  updatedAt?: number; // 更新时间
+}
+```
+
+### 2. 请求记录 (RequestRecord)
+
+```typescript
+interface RequestRecord {
+  id: string;
+  timestamp: number;
+
+  // 请求信息
+  client: string;
+  path: string;
+  method: string;
+
+  // 请求体
+  originalBody: any; // 原始请求
+  modifiedBody: any; // 修改后请求
+
+  // 规则匹配
+  matchedRules: Array<{
+    ruleId: string;
+    opType: string;
+  }>;
+
+  // 响应信息
+  responseStatus?: number;
+  durationMs?: number;
+  responseHeaders?: Record<string, string>;
+  error?: string;
+}
+```
+
+### 3. 配置 (Config)
+
+**简化版配置**：
+
+```typescript
+interface Config {
+  listen: {
+    host: string;
+    port: number; // 代理端口 7070
+  };
+
+  upstreams: {
+    anthropic: string;
+    openai: string;
+    gemini: string;
+  };
+
+  rules: Rule[];
+  debug: boolean;
+}
+```
+
+**完整版配置**：
+
+```typescript
+interface Config {
+  listen: {
+    host: string;
+    port: number; // 代理端口 7070
+  };
+
+  suppliers: Supplier[];
+
+  rules: Rule[];
+
+  storage: {
+    maxHistory: number; // 1000
+  };
+
+  debug: boolean;
+}
+
+interface Supplier {
+  id: string;
+  name: string;
+  baseUrl: string;
+  localPrefix: string; // 如 /claude
+  pathMappings?: PathMapping[];
+  enabled: boolean;
+}
+```
+
+---
+
+## 🔄 核心流程
+
+### 流程1：规则编辑与生效
+
+```
+用户在前端编辑规则
+  ↓
+点击保存
+  ↓
+前端 POST /api/config/sync
+  ↓
+后端：
+  1. 验证规则格式
+  2. 更新内存中的config.rules
+  3. 写入 ~/.local/promptxy/config.json
+  4. 返回成功
+  ↓
+前端显示保存成功
+  ↓
+下一个CLI请求到达代理(7070)
+  ↓
+代理使用新规则修改请求
+  ↓
+完成
+```
+
+### 流程2：请求捕获与展示
+
+```
+CLI发起请求 → 代理(7070)
+  ↓
+代理捕获请求：
+  1. 记录原始请求体
+  2. 应用规则 → 得到修改后请求
+  3. 转发到上游API
+  4. 获取响应
+  5. 记录到SQLite
+  6. 通过SSE推送事件
+  ↓
+前端SSE客户端收到事件
+  ↓
+前端 GET /api/requests/:id
+  ↓
+显示请求详情（原始 vs 修改对比）
+```
+
+### 流程3：数据清理
+
+```
+后端定时任务（每小时）：
+  ↓
+检查数据库记录数
+  ↓
+如果 > 100条
+  ↓
+DELETE FROM requests
+WHERE id NOT IN (
+  SELECT id FROM requests
+  ORDER BY timestamp DESC
+  LIMIT 100
+)
+  ↓
+记录清理日志
+```
+
+---
+
+## 🎨 前端页面设计（HeroUI）
+
+### 页面1：规则列表 (RulesPage)
+
+**组件结构：**
+
+```
+<Page>
+  <Header title="规则管理" actions={[新建, 批量操作]} />
+
+  <SearchAndFilter>
+    <Input placeholder="搜索规则..." />
+    <Select label="客户端" options={[全部, Claude, Codex, Gemini]} />
+    <Select label="状态" options={[全部, 启用, 禁用]} />
+  </SearchAndFilter>
+
+  <Stats cards={[
+    { label: '总数', value: 42 },
+    { label: '启用', value: 38, color: 'success' },
+    { label: '禁用', value: 4, color: 'error' }
+  ]} />
+
+  <RuleList>
+    {rules.map(rule => (
+      <RuleCard
+        key={rule.id}
+        rule={rule}
+        onEdit={handleEdit}
+        onDelete={handleDelete}
+        onToggle={handleToggle}
+      />
+    ))}
+  </RuleList>
+
+  <Pagination />
+</Page>
+```
+
+**HeroUI组件使用：**
+
+- `@heroui/input` - 搜索框
+- `@heroui/select` - 筛选器
+- `@heroui/card` - 规则卡片
+- `@heroui/button` - 操作按钮
+- `@heroui/modal` - 编辑弹窗
+- `@heroui/pagination` - 分页
+
+### 页面2：请求详情 (RequestDetail)
+
+**组件结构：**
+
+```
+<Modal open={true} onClose={close}>
+  <Modal.Header>
+    <Text h3>请求详情</Text>
+  </Modal.Header>
+
+  <Modal.Body>
+    <Grid>
+      <Grid xs={12}>
+        <Card>
+          <Card.Body>
+            <Description
+              data={{
+                ID: request.id,
+                时间: formatTime(request.timestamp),
+                客户端: request.client,
+                路径: request.path,
+                状态: request.responseStatus
+              }}
+            />
+          </Card.Body>
+        </Card>
+      </Grid>
+
+      <Grid xs={6}>
+        <Card>
+          <Card.Header>原始请求</Card.Header>
+          <Card.Body>
+            <CodeBlock language="json">
+              {JSON.stringify(request.originalBody, null, 2)}
+            </CodeBlock>
+          </Card.Body>
+        </Card>
+      </Grid>
+
+      <Grid xs={6}>
+        <Card>
+          <Card.Header>修改后请求</Card.Header>
+          <Card.Body>
+            <CodeBlock language="json">
+              {JSON.stringify(request.modifiedBody, null, 2)}
+            </CodeBlock>
+          </Card.Body>
+        </Card>
+      </Grid>
+
+      <Grid xs={12}>
+        <Card>
+          <Card.Header>匹配规则</Card.Header>
+          <Card.Body>
+            <List>
+              {request.matchedRules.map(match => (
+                <List.Item key={match.ruleId}>
+                  {match.ruleId} ({match.opType})
+                </List.Item>
+              ))}
+            </List>
+          </Card.Body>
+        </Card>
+      </Grid>
+    </Grid>
+  </Modal.Body>
+
+  <Modal.Footer>
+    <Button onPress={replay}>重放</Button>
+    <Button onPress={export}>导出</Button>
+    <Button onPress={close}>关闭</Button>
+  </Modal.Footer>
+</Modal>
+```
+
+---
+
+## 📝 实现状态
+
+### 已完成功能
+
+- ✅ 简化版（npm 包）核心功能
+  - ✅ 统一网关核心
+  - ✅ 配置管理
+  - ✅ 规则引擎（7种操作类型）
+  - ✅ AI 服务适配器（Claude、Codex、Gemini）
+
+- ✅ 完整版（带 Web UI）
+  - ✅ SQLite 数据库
+  - ✅ API 处理器
+  - ✅ SSE 实时推送
+  - ✅ 供应商管理
+  - ✅ 请求历史记录
+
+- ✅ 前端应用（React + HeroUI）
+  - ✅ 规则管理页面
+  - ✅ 请求监控页面
+  - ✅ 预览测试页面
+  - ✅ 设置管理页面
+  - ✅ 集成测试套件
+
+---
+
+## 🚀 快速开始
+
+### 开发环境
+
+**1. 启动后端**
+
+```bash
+cd backend
+npm install
+npm run dev  # 监听模式，端口自动分配（8000-9000范围）
+```
+
+**2. 启动前端**
+
+```bash
+cd frontend
+npm install
+npm run dev  # Vite 开发服务器，默认 5173
+```
+
+**3. 配置代理**
+
+```bash
+# Claude Code
+export ANTHROPIC_BASE_URL="http://127.0.0.1:PORT/claude"
+
+# Codex CLI
+export OPENAI_BASE_URL="http://127.0.0.1:PORT/codex"
+
+# Gemini CLI
+export GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:PORT/gemini"
+```
+
+**4. 访问 Web UI**
+
+```
+http://localhost:5173
+```
+
+### 生产部署
+
+**方式一：使用 npm 包（推荐）**
+
+```bash
+npm install -g promptxy
+promptxy --port 7070
+```
+
+**方式二：从源码构建**
+
+```bash
+npm run build
+npm start -- --port 7070
+```
+
+访问 Web UI: `http://127.0.0.1:7070/_promptxy/`
+
+---
+
+**文档版本**: v2.1
+**创建日期**: 2025-12-20
+**更新日期**: 2025-12-30
+**状态**: ✅ 已实现
+
+---
+
+## 🎯 关键设计决策
+
+### 1. 为什么分开开发但统一部署？
+
+- **开发体验**：前端热重载，后端独立重启
+- **部署简单**：最终一个进程，一个端口
+- **维护方便**：清晰的代码分离
+
+### 2. 为什么使用SSE而不是WebSocket？
+
+- **单向通信**：只需要服务器推送新请求
+- **实现简单**：原生支持，无需额外库
+- **资源友好**：连接数限制更少
+
+### 3. 为什么使用SQLite而不是文件JSON？
+
+- **查询能力**：支持分页、筛选、索引
+- **并发安全**：避免文件锁问题
+- **性能**：100条记录查询毫秒级
+
+### 4. 为什么使用HeroUI？
+
+- **组件丰富**：表单、表格、模态框等开箱即用
+- **美观专业**：符合开发者工具审美
+- **TypeScript友好**：完整类型支持
+- **Tailwind集成**：易于自定义
+
+---
+
+## 📚 相关文档
+
+- [配置参考](./configuration.md) - 配置文件详解
+- [使用指南](./usage.md) - CLI 配置和规则语法
+- [项目背景](./origin_and_requirements.md) - 项目初衷与需求溯源
+
+---
+
+**文档版本**: v2.1
+**创建日期**: 2025-12-20
+**更新日期**: 2025-12-31
+**状态**: ✅ 已实现

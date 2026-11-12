@@ -1,0 +1,377 @@
+/**
+ * Codex Responses API 类型定义
+ *
+ * 参考: refence/codex/codex-rs/protocol/src/models.rs
+ */
+
+/**
+ * ResponseItem 类型
+ */
+export type CodexResponseItem =
+  | CodexMessageItem
+  | CodexFunctionCallItem
+  | CodexFunctionCallOutputItem
+  | CodexCustomToolCallItem
+  | CodexCustomToolCallOutputItem
+  | CodexLocalShellCallItem
+  | CodexWebSearchCallItem;
+
+/**
+ * Message Item
+ */
+export type CodexMessageItem = {
+  type: 'message';
+  // OpenAI/Codex Responses accepts "developer" role; CLIProxyAPI uses it for Claude system injection.
+  role: 'user' | 'assistant' | 'system' | 'developer';
+  content: CodexContentItem[];
+};
+
+/**
+ * Content Item（用于 message.content）
+ */
+export type CodexContentItem =
+  | CodexInputTextItem
+  | CodexInputImageItem
+  | CodexOutputTextItem;
+
+/**
+ * Input Text Item
+ */
+export type CodexInputTextItem = {
+  type: 'input_text';
+  text: string;
+};
+
+/**
+ * Input Image Item
+ */
+export type CodexInputImageItem = {
+  type: 'input_image';
+  image_url?: string;
+  source?: {
+    type: 'url';
+    url: string;
+  };
+};
+
+/**
+ * Output Text Item
+ */
+export type CodexOutputTextItem = {
+  type: 'output_text';
+  text: string;
+};
+
+/**
+ * Function Call Item
+ */
+export type CodexFunctionCallItem = {
+  type: 'function_call';
+  call_id: string;
+  name: string;
+  arguments: string; // JSON string
+};
+
+/**
+ * Function Call Output Item
+ */
+export type CodexFunctionCallOutputItem = {
+  type: 'function_call_output';
+  call_id: string;
+  output: string | CodexContentItem[] | { content: string; success?: boolean };
+};
+
+/**
+ * Custom Tool Call Item
+ */
+export type CodexCustomToolCallItem = {
+  type: 'custom_tool_call';
+  call_id: string;
+  name: string;
+  input: string; // JSON string
+};
+
+/**
+ * Custom Tool Call Output Item
+ */
+export type CodexCustomToolCallOutputItem = {
+  type: 'custom_tool_call_output';
+  call_id: string;
+  output: string | CodexContentItem[];
+};
+
+/**
+ * Local Shell Call Item
+ */
+export type CodexLocalShellCallItem = {
+  type: 'local_shell_call';
+  call_id: string;
+  name: string;
+  arguments: string; // JSON string
+};
+
+/**
+ * Web Search Call Item
+ */
+export type CodexWebSearchCallItem = {
+  type: 'web_search_call';
+  call_id: string;
+  query: string;
+};
+
+/**
+ * Tool Definition（Responses API）
+ */
+export type CodexResponsesApiTool = {
+  type: 'function';
+  name: string;
+  description?: string;
+  strict?: boolean;
+  parameters?: {
+    type: 'object';
+    properties?: Record<string, unknown>;
+    required?: string[];
+    additionalProperties?: boolean;
+    [key: string]: unknown;
+  };
+};
+
+/**
+ * Reasoning 配置
+ */
+export type CodexReasoning = {
+  effort?: string;
+  // CLIProxyAPI uses summary="auto" (string). Keep object form for older internal callers.
+  summary?: 'auto' | {
+    enable?: boolean;
+    max_length?: number;
+  };
+};
+
+/**
+ * Text 配置
+ */
+export type CodexText = {
+  verbosity?: 'low' | 'medium' | 'high';
+  format?: {
+    type: 'json_schema';
+    strict: boolean;
+    schema: Record<string, unknown>;
+    name?: string;
+  };
+};
+
+/**
+ * Responses API 请求体
+ */
+export type CodexResponsesApiRequest = {
+  model: string;
+  instructions: string;
+  input: CodexResponseItem[];
+  tools: any[];
+  tool_choice: string;
+  parallel_tool_calls: boolean;
+  reasoning?: CodexReasoning;
+  store: boolean;
+  stream: boolean;
+  include: string[];
+  /** 缓存键，用于影响路由，提高缓存命中率 */
+  prompt_cache_key?: string;
+  /** 缓存保留策略：in_memory (默认) 或 24h */
+  prompt_cache_retention?: 'in_memory' | '24h';
+  text?: CodexText;
+};
+
+/**
+ * SSE 事件类型（data.type 字段）
+ */
+export type CodexSSEEventType =
+  | 'response.created'
+  | 'response.content_part.added'
+  | 'response.content_part.done'
+  | 'response.output_text.delta'
+  | 'response.output_item.added'
+  | 'response.output_item.done'
+  | 'response.function_call_arguments.delta'
+  | 'response.reasoning_text.delta'
+  | 'response.reasoning_summary_part.added'
+  | 'response.reasoning_summary_part.done'
+  | 'response.reasoning_summary_text.delta'
+  | 'response.failed'
+  | 'response.completed';
+
+/**
+ * response.created 事件
+ */
+export type CodexResponseCreatedEvent = {
+  type: 'response.created';
+  id: string;
+  status: string;
+};
+
+/**
+ * response.output_text.delta 事件
+ */
+export type CodexOutputTextDeltaEvent = {
+  type: 'response.output_text.delta';
+  delta: string;
+};
+
+/**
+ * response.content_part.added / done
+ * OpenAI Responses 形态会显式发送 content part 的开始/结束事件（CLIProxyAPI 参考实现依赖它来 start/stop text block）。
+ */
+export type CodexContentPartAddedEvent = {
+  type: 'response.content_part.added';
+  [key: string]: unknown;
+};
+
+export type CodexContentPartDoneEvent = {
+  type: 'response.content_part.done';
+  [key: string]: unknown;
+};
+
+/**
+ * response.reasoning_text.delta 事件
+ * 参考: refence/codex/codex-rs/codex-api/src/sse/responses.rs:231-241
+ */
+export type CodexReasoningTextDeltaEvent = {
+  type: 'response.reasoning_text.delta';
+  delta: string;
+  content_index?: number;
+};
+
+/**
+ * response.reasoning_summary_text.delta 事件
+ * 参考: refence/codex/codex-rs/codex-api/src/sse/responses.rs:220-230
+ */
+export type CodexReasoningSummaryTextDeltaEvent = {
+  type: 'response.reasoning_summary_text.delta';
+  delta: string;
+  summary_index?: number;
+};
+
+export type CodexReasoningSummaryPartAddedEvent = {
+  type: 'response.reasoning_summary_part.added';
+  [key: string]: unknown;
+};
+
+export type CodexReasoningSummaryPartDoneEvent = {
+  type: 'response.reasoning_summary_part.done';
+  [key: string]: unknown;
+};
+
+/**
+ * Output Item（用于 output_item.done）
+ */
+export type CodexOutputItem =
+  | CodexOutputMessageItem
+  | CodexOutputFunctionCallItem
+  | CodexOutputCustomToolCallItem;
+
+/**
+ * Output Message Item
+ */
+export type CodexOutputMessageItem = {
+  type: 'message';
+  role: 'assistant';
+  content: CodexContentItem[];
+};
+
+/**
+ * Output Function Call Item
+ */
+export type CodexOutputFunctionCallItem = {
+  type: 'function_call';
+  call_id: string;
+  name: string;
+  arguments: string; // JSON string
+};
+
+/**
+ * Output Custom Tool Call Item
+ */
+export type CodexOutputCustomToolCallItem = {
+  type: 'custom_tool_call';
+  call_id: string;
+  name: string;
+  input: string; // JSON string
+};
+
+/**
+ * response.output_item.added 事件
+ */
+export type CodexOutputItemAddedEvent = {
+  type: 'response.output_item.added';
+  item: CodexOutputItem;
+};
+
+/**
+ * response.output_item.done 事件
+ */
+export type CodexOutputItemDoneEvent = {
+  type: 'response.output_item.done';
+  item: CodexOutputItem;
+};
+
+/**
+ * response.function_call_arguments.delta 事件
+ * Tool use 参数增量事件，逐个发送参数片段
+ * 参考: refence/CLIProxyAPI/internal/translator/codex/claude/codex_claude_response.go:155-162
+ */
+export type CodexFunctionCallArgumentsDeltaEvent = {
+  type: 'response.function_call_arguments.delta';
+  delta: string; // JSON 字符串增量
+  output_index?: number;
+};
+
+/**
+ * response.failed 事件
+ */
+export type CodexResponseFailedEvent = {
+  type: 'response.failed';
+  error: {
+    message: string;
+    code?: string;
+  };
+};
+
+/**
+ * response.completed 事件
+ * 参考: refence/codex/codex-rs/codex-api/src/sse/responses.rs:85-116
+ */
+export type CodexResponseCompletedUsage = {
+  input_tokens: number;
+  input_tokens_details?: {
+    cached_tokens: number;
+  };
+  output_tokens: number;
+  output_tokens_details?: {
+    reasoning_tokens: number;
+  };
+  total_tokens: number;
+};
+
+export type CodexResponseCompletedEvent = {
+  type: 'response.completed';
+  id: string;
+  usage?: CodexResponseCompletedUsage;
+};
+
+/**
+ * Codex SSE 事件
+ */
+export type CodexSSEEvent =
+  | CodexResponseCreatedEvent
+  | CodexContentPartAddedEvent
+  | CodexContentPartDoneEvent
+  | CodexOutputTextDeltaEvent
+  | CodexReasoningTextDeltaEvent
+  | CodexReasoningSummaryPartAddedEvent
+  | CodexReasoningSummaryPartDoneEvent
+  | CodexReasoningSummaryTextDeltaEvent
+  | CodexOutputItemAddedEvent
+  | CodexOutputItemDoneEvent
+  | CodexFunctionCallArgumentsDeltaEvent
+  | CodexResponseFailedEvent
+  | CodexResponseCompletedEvent;

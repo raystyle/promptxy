@@ -1,0 +1,260 @@
+/**
+ * Claude Messages API 类型定义
+ *
+ * 参考: refence/claude-code-router
+ */
+
+/**
+ * System Block（Claude 支持 string 或 blocks 数组）
+ */
+export type ClaudeSystemBlock =
+  | { type: 'text'; text: string | string[] }
+  | { type: 'image'; source: { type: 'url'; url: string } };
+
+/**
+ * Content Block 类型
+ */
+export type ClaudeContentBlock =
+  | ClaudeTextBlock
+  | ClaudeImageBlock
+  | ClaudeToolUseBlock
+  | ClaudeToolResultBlock;
+
+/**
+ * Text Block
+ */
+export type ClaudeTextBlock = {
+  type: 'text';
+  text: string;
+};
+
+/**
+ * Image Block
+ */
+export type ClaudeImageBlock = {
+  type: 'image';
+  source: {
+    type: 'url';
+    url: string;
+  } | {
+    // Anthropic image blocks also support base64 payloads.
+    // CLIProxyAPI reference accepts {data|base64, media_type|mime_type} and converts to data:<mime>;base64,...
+    type: 'base64';
+    media_type?: string;
+    mime_type?: string;
+    data?: string;
+    base64?: string;
+  };
+};
+
+/**
+ * Tool Use Block
+ */
+export type ClaudeToolUseBlock = {
+  type: 'tool_use';
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+};
+
+/**
+ * Tool Result Block
+ */
+export type ClaudeToolResultBlock = {
+  type: 'tool_result';
+  tool_use_id: string;
+  content?: string | Array<ClaudeTextBlock | ClaudeImageBlock>;
+  is_error?: boolean;
+};
+
+/**
+ * Message
+ */
+export type ClaudeMessage = {
+  role: 'user' | 'assistant';
+  content: string | ClaudeContentBlock[];
+};
+
+/**
+ * Tool Definition
+ */
+export type ClaudeFunctionTool = {
+  name: string;
+  description?: string;
+  input_schema: {
+    type: 'object';
+    properties?: Record<string, unknown>;
+    required?: string[];
+    [key: string]: unknown;
+  };
+};
+
+// Built-in tools may be represented with a type discriminator (no name/input_schema).
+// CLIProxyAPI special-cases "web_search_20250305".
+export type ClaudeWebSearchTool = {
+  type: 'web_search_20250305';
+  [key: string]: unknown;
+};
+
+export type ClaudeTool = ClaudeFunctionTool | ClaudeWebSearchTool;
+
+/**
+ * Claude Messages API 请求体
+ */
+export type ClaudeMessagesRequest = {
+  model: string;
+  messages: ClaudeMessage[];
+  system?: string | ClaudeSystemBlock[];
+  tools?: ClaudeTool[];
+  metadata?: {
+    user_id?: string;
+    [key: string]: unknown;
+  };
+  thinking?: {
+    type: 'enabled';
+    budget_tokens?: number;
+  };
+  stream?: boolean;
+  max_tokens?: number;
+  temperature?: number;
+  top_p?: number;
+  stop_sequences?: string[];
+  [key: string]: unknown;
+};
+
+/**
+ * SSE 事件类型
+ */
+export type ClaudeSSEEventType =
+  | 'message_start'
+  | 'message_delta'
+  | 'message_stop'
+  | 'content_block_start'
+  | 'content_block_delta'
+  | 'content_block_stop'
+  | 'error'
+  | 'ping';
+
+/**
+ * Content Block 类型
+ */
+export type ClaudeContentBlockType = 'text' | 'tool_use' | 'thinking';
+
+/**
+ * Delta 类型
+ */
+export type ClaudeDeltaType = 'text_delta' | 'input_json_delta' | 'thinking_delta';
+
+/**
+ * message_start 事件
+ */
+export type ClaudeMessageStartEvent = {
+  type: 'message_start';
+  message: {
+    id: string;
+    /** 兼容旧实现：Claude SSE message 对象可带 type */
+    type?: 'message';
+    role: 'assistant';
+    content: Array<{ type: ClaudeContentBlockType }>;
+    model: string;
+    stop_reason: string | null;
+    /** 兼容旧实现：stop_sequence 常为 null */
+    stop_sequence?: string | null;
+    /** 兼容旧实现：初始化时带 0/0 usage */
+    usage?: {
+      input_tokens: number;
+      output_tokens: number;
+    };
+  };
+};
+
+/**
+ * content_block_start 事件
+ */
+export type ClaudeContentBlockStartEvent = {
+  type: 'content_block_start';
+  index: number;
+  content_block: {
+    type: ClaudeContentBlockType;
+    text?: string;
+    thinking?: string;
+    id?: string;
+    name?: string;
+  };
+};
+
+/**
+ * content_block_delta 事件
+ */
+export type ClaudeContentBlockDeltaEvent = {
+  type: 'content_block_delta';
+  index: number;
+  delta: {
+    type: ClaudeDeltaType;
+    text?: string;
+    thinking?: string;
+    partial_json?: string;
+  };
+};
+
+/**
+ * content_block_stop 事件
+ */
+export type ClaudeContentBlockStopEvent = {
+  type: 'content_block_stop';
+  index: number;
+};
+
+/**
+ * message_delta 事件
+ */
+export type ClaudeMessageDeltaEvent = {
+  type: 'message_delta';
+  delta: {
+    stop_reason?: string;
+    stop_sequence?: number;
+  };
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
+  };
+};
+
+/**
+ * message_stop 事件
+ */
+export type ClaudeMessageStopEvent = {
+  type: 'message_stop';
+};
+
+/**
+ * Claude SSE 事件
+ */
+export type ClaudeSSEEvent =
+  | ClaudeMessageStartEvent
+  | ClaudeContentBlockStartEvent
+  | ClaudeContentBlockDeltaEvent
+  | ClaudeContentBlockStopEvent
+  | ClaudeMessageDeltaEvent
+  | ClaudeMessageStopEvent
+  | { type: 'error'; error: { message: string } }
+  | { type: 'ping' };
+
+/**
+ * 规范化后的 System（统一转为 string）
+ */
+export type NormalizedSystem = {
+  text: string;
+  originalType: 'string' | 'blocks';
+  hasEnvSeparator: boolean;
+};
+
+/**
+ * 规范化后的 Message Content（统一转为 blocks）
+ */
+export type NormalizedMessageContent = {
+  blocks: ClaudeContentBlock[];
+  originalType: 'string' | 'blocks';
+};
