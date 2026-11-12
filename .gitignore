@@ -15,7 +15,4 @@ refence/
 # Tmux-worktree task management
 .tmux-worktree/
 
-# Local config
-promptxy.config.json
-
 package-lock.json
